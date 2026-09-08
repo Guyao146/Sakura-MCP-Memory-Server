@@ -254,6 +254,16 @@ describe('Web management security', () => {
     expect(adminPage).not.toContain("/revoke',{method:'POST'}");
   });
 
+  it('shows a client session view with derived status labels', () => {
+    for (const marker of ['data-view="clients"', 'loadClients()', '/api/admin/clients', 'clientStatusText',
+      '上传记忆中', '已连接', '已断开', '空闲', 'clientAuto']) {
+      expect(adminPage).toContain(marker);
+    }
+    // Client-supplied names must never be interpolated as HTML.
+    expect(adminPage).toContain('title.textContent=c.client_name');
+    expect(adminPage).not.toContain('innerHTML=c.');
+  });
+
   it('contains syntactically valid browser JavaScript', () => {
     const script = adminPage.match(/<script>([\s\S]*)<\/script>/)?.[1];
     expect(script).toBeTruthy();

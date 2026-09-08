@@ -7,6 +7,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { normalizeConfig, validateConfig, type SyncConfig } from './config.js';
+import type { TaskInventoryItem } from './sync.js';
 import { panelHtml } from './gui-page.js';
 
 export interface PanelHooks {
@@ -15,6 +16,7 @@ export interface PanelHooks {
   getStatus: () => PanelStatus;
   syncNow: () => Promise<void>;
   testConnection: (config: SyncConfig) => Promise<{ ok: boolean; error?: string }>;
+  listTasks: () => Promise<TaskInventoryItem[]>;
 }
 
 export interface PanelStatus {
@@ -91,6 +93,9 @@ export class ConfigPanel {
       if (request.method === 'POST' && url.pathname === '/api/sync') {
         await this.hooks.syncNow();
         return this.json(response, 200, { started: true, status: this.hooks.getStatus() });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/tasks') {
+        return this.json(response, 200, { tasks: await this.hooks.listTasks() });
       }
       this.json(response, 404, { error: 'not_found' });
     } catch (error) {

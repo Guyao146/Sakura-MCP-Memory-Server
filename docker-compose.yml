@@ -64,7 +64,7 @@ services:
       retries: 10
 
   sakura-mcp:
-    image: ${SAKURA_MCP_IMAGE:-ghcr.io/guyao146/sakura-mcp-server:0.3.1}
+    image: ${SAKURA_MCP_IMAGE:-ghcr.io/guyao146/sakura-mcp-server:0.3.2}
     container_name: sakura-mcp-server-app
     pull_policy: always
     restart: unless-stopped

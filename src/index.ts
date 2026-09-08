@@ -7,6 +7,10 @@ import * as z from 'zod/v4';
 import { AuditLogger } from './audit.js';
 import { AgentRepository } from './agents/repository.js';
 import { AuthService } from './auth.js';
+import type { Principal } from './auth.js';
+import { ClientSessionRepository } from './clients/repository.js';
+import { isWriteTool, readMcpFacts } from './clients/facts.js';
+import type { ClientIdentity } from './clients/types.js';
 import { loadConfig } from './config.js';
 import { Database } from './database.js';
 import { MemoryRepository } from './memory/repository.js';
@@ -45,6 +49,7 @@ const webSessions = new WebSessionService(database, () => config);
 const memories = new MemoryRepository(database);
 const spaces = new SpaceRepository(database);
 const agents = new AgentRepository(database, baseConfig.setup.encryptionKey);
+const clientSessions = new ClientSessionRepository(database);
 const semantic = new SemanticMemoryService(database, () => config);
 const governance = new MemoryGovernanceService(database);
 const transfer = new MemoryTransferService(database, semantic, governance);
@@ -323,6 +328,8 @@ app.post('/api/admin/jobs/:id/cancel', async context => adminApi(context, true, 
   jobs.cancel(identity.userId, z.string().uuid().parse(context.req.param('id')))));
 app.post('/api/admin/jobs/:id/retry', async context => adminApi(context, true, identity =>
   jobs.retry(identity.userId, z.string().uuid().parse(context.req.param('id')))));
+app.get('/api/admin/clients', async context => adminApi(context, false, identity =>
+  clientSessions.list(identity.userId, { systemAdmin: identity.isSystemAdmin })));
 app.get('/api/admin/agents', async context => adminApi(context, false, identity => agents.list(identity.userId)));
 app.post('/api/admin/agents', async context => adminApi(context, true, async identity => {
   const body = z.object({ name: z.string().min(1).max(120), scopes: agentScopeSchema, expires_at: z.iso.datetime().optional() }).parse(await context.req.json());
@@ -434,6 +441,11 @@ async function handleMcp(context: Context): Promise<Response> {
     return context.json({ error: 'unauthorized', error_description: message }, 401,
       { 'WWW-Authenticate': `Bearer resource_metadata="${config.publicBaseUrl}${metadataPath}"` });
   }
+  // Session tracking is best-effort telemetry: never let it fail a real request.
+  const tracker = await beginClientTracking(context, principal).catch(error => {
+    logger.warn({ err: error }, 'Client session tracking failed');
+    return undefined;
+  });
   const server = createServer(database, principal, audit, () => config);
   // Stateless transport prevents one authenticated client's session from being reused by another principal.
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined });
@@ -444,15 +456,61 @@ async function handleMcp(context: Context): Promise<Response> {
     closed = true;
     await transport.close().catch(() => undefined);
     await server.close().catch(() => undefined);
+    if (tracker) await tracker.finish().catch(() => undefined);
   };
   let response: Response;
   try { response = await transport.handleRequest(context.req.raw, { parsedBody: context.get('parsedBody' as never) as unknown }); }
   catch (error) {
     logger.error({ err: error, principal: principal.id }, 'MCP transport request failed');
+    if (tracker) await tracker.finish({ failed: true }).catch(() => undefined);
     await cleanup();
     return context.json({ error: 'MCP request failed.' }, 500);
   }
   return streamWithDeferredCleanup(response, cleanup);
+}
+
+/**
+ * Opens a client-session record for one MCP exchange. Returns a handle that must
+ * be finished when the response stream closes, which is how an in-flight tool
+ * call stops being reported as "uploading".
+ */
+async function beginClientTracking(context: Context, principal: Principal) {
+  const facts = readMcpFacts(context.get('parsedBody' as never) as unknown);
+  const { userId } = await memories.ensureUser(principal.id, { email: principal.email, displayName: principal.displayName });
+  const identity: ClientIdentity = {
+    userId,
+    agentId: principal.agentId,
+    authSource: principal.source,
+    // A client that never sends clientInfo still deserves a row; label it by transport.
+    clientName: facts.clientName ?? (principal.agentId ? 'Agent (未报告名称)' : '未知客户端'),
+    clientVersion: facts.clientVersion,
+    protocolVersion: facts.protocolVersion,
+    remoteAddress: clientAddressFor(context)
+  };
+  if (context.req.method === 'DELETE') {
+    await clientSessions.disconnect(identity);
+    return { finish: async () => undefined };
+  }
+  const activity = facts.isToolCall && facts.toolName ? facts.toolName : facts.method;
+  const counted = facts.isToolCall;
+  await clientSessions.touch(identity, {
+    activity, delta: counted ? 1 : 0, isWrite: isWriteTool(facts.toolName)
+  });
+  return {
+    finish: async (options: { failed?: boolean } = {}) => {
+      if (counted) await clientSessions.release(identity, options);
+      else if (options.failed) await clientSessions.touch(identity, { activity, failed: true });
+    }
+  };
+}
+
+/** Best-effort remote address for display, honouring the trust-proxy setting. */
+function clientAddressFor(context: Context): string | undefined {
+  if (config.security.trustProxy) {
+    const forwarded = context.req.header('x-forwarded-for')?.split(',')[0]?.trim();
+    if (forwarded) return forwarded.slice(0, 64);
+  }
+  return context.req.header('x-real-ip')?.slice(0, 64);
 }
 
 serve({ fetch: app.fetch, hostname: baseConfig.host, port: baseConfig.port }, info => logger.info({ host: baseConfig.host, port: info.port }, 'Sakura MCP Server listening'));

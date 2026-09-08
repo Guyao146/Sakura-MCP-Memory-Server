@@ -8,11 +8,12 @@
  * cannot start — headless machines, missing tray support — the daemon keeps
  * running in console mode and prints the panel URL instead of exiting.
  */
-import { spawn } from 'node:child_process';
 import { loadConfig, saveConfig } from './store.js';
 import { dataDir, type SyncConfig } from './config.js';
 import { SyncScheduler } from './scheduler.js';
+import { listTaskInventory } from './sync.js';
 import { ConfigPanel } from './gui.js';
+import { openPanelWindow } from './window.js';
 import { resolveSysTray } from './systray-interop.js';
 import { prepareTrayBinary } from './tray-binary.js';
 import { trayIconIco, trayIconPng } from './tray-icon.js';
@@ -33,26 +34,31 @@ async function main(): Promise<void> {
     },
     getStatus: () => scheduler.status(),
     syncNow: async () => { void scheduler.runOnce(); },
-    testConnection: cfg => scheduler.testConnection(cfg)
+    testConnection: cfg => scheduler.testConnection(cfg),
+    listTasks: () => listTaskInventory(config)
   });
 
   const url = await panel.start();
   log(`配置面板：${url}`);
   log(`数据目录：${dataDir()}`);
   scheduler.restart();
-  if (!config.mcpUrl || !config.token) log('尚未配置 MCP 地址与 Agent 密钥，请打开配置面板填写。');
+  const unconfigured = !config.mcpUrl || !config.token;
+  if (unconfigured) log('尚未配置 MCP 地址与 Agent 密钥，请在配置窗口中填写。');
 
   await startTray(url, scheduler, () => config, async () => {
     scheduler.stop();
     await panel.stop();
   });
+
+  // A fresh install has nothing to sync yet, so show the window immediately
+  // instead of leaving the user to hunt for the tray icon.
+  if (unconfigured) showPanel(url);
 }
 
-/** Opens a URL with the platform's default handler. */
-function openUrl(url: string): void {
-  const command = process.platform === 'win32' ? 'cmd' : process.platform === 'darwin' ? 'open' : 'xdg-open';
-  const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url];
-  spawn(command, args, { detached: true, stdio: 'ignore' }).unref();
+/** Opens the panel as a chromeless app window, falling back to the default browser. */
+function showPanel(url: string): void {
+  const handle = openPanelWindow(url);
+  log(handle.mode === 'app-window' ? '已打开配置窗口' : '未找到可用浏览器引擎，已用默认浏览器打开配置面板');
 }
 
 async function startTray(url: string, scheduler: SyncScheduler, getConfig: () => SyncConfig,
@@ -78,7 +84,7 @@ async function startTray(url: string, scheduler: SyncScheduler, getConfig: () =>
     return;
   }
 
-  const openItem = { title: '打开配置面板', tooltip: '在浏览器中编辑同步设置', enabled: true, checked: false };
+  const openItem = { title: '打开配置窗口', tooltip: '在独立窗口中编辑同步设置', enabled: true, checked: false };
   const syncItem = { title: '立即同步', tooltip: '马上扫描一次 Cline 任务历史', enabled: true, checked: false };
   const statusItem = { title: '状态：就绪', tooltip: '最近一次同步结果', enabled: false, checked: false };
   const toggleItem = { title: '暂停自动同步', tooltip: '临时停止定时扫描', enabled: true, checked: getConfig().enabled };
@@ -105,7 +111,7 @@ async function startTray(url: string, scheduler: SyncScheduler, getConfig: () =>
 
   tray.onClick(action => {
     const title = action.item?.title;
-    if (title === openItem.title) { openUrl(url); return; }
+    if (title === openItem.title) { showPanel(url); return; }
     if (title === syncItem.title) { void scheduler.runOnce(); return; }
     if (title === toggleItem.title) {
       const enabled = !getConfig().enabled;

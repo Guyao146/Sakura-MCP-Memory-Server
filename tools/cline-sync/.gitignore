@@ -2,6 +2,7 @@ node_modules/
 dist/
 release/
 traybin/
+panel-profile/
 config.json
 cursors.json
 out.txt

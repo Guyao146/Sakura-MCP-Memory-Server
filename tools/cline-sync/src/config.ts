@@ -22,6 +22,15 @@ export interface SyncConfig {
   maxTaskAgeDays: number;
   /** Redact secrets (tokens, keys, .env values) before uploading. */
   redactSecrets: boolean;
+  /**
+   * Task selection mode:
+   * - `all`: sync every task inside the age window (default).
+   * - `include`: only sync task IDs listed in `selectedTasks`.
+   * - `exclude`: sync everything except the listed task IDs.
+   */
+  selectionMode: 'all' | 'include' | 'exclude';
+  /** Task IDs the selection mode applies to. */
+  selectedTasks: string[];
 }
 
 export const DEFAULT_CONFIG: SyncConfig = {
@@ -31,7 +40,9 @@ export const DEFAULT_CONFIG: SyncConfig = {
   intervalMinutes: 10,
   enabled: false,
   maxTaskAgeDays: 30,
-  redactSecrets: true
+  redactSecrets: true,
+  selectionMode: 'all',
+  selectedTasks: []
 };
 
 /** Per-platform Cline (saoudrizwan.claude-dev) globalStorage tasks directory. */
@@ -55,6 +66,7 @@ export function dataDir(env = process.env, platform = process.platform): string 
 
 export function normalizeConfig(partial: Partial<SyncConfig>): SyncConfig {
   const merged = { ...DEFAULT_CONFIG, ...partial };
+  const mode = merged.selectionMode === 'include' || merged.selectionMode === 'exclude' ? merged.selectionMode : 'all';
   return {
     mcpUrl: merged.mcpUrl.trim(),
     token: merged.token.trim(),
@@ -62,8 +74,26 @@ export function normalizeConfig(partial: Partial<SyncConfig>): SyncConfig {
     intervalMinutes: clamp(Math.round(merged.intervalMinutes), 1, 1440),
     enabled: Boolean(merged.enabled),
     maxTaskAgeDays: clamp(Math.round(merged.maxTaskAgeDays), 0, 3650),
-    redactSecrets: merged.redactSecrets !== false
+    redactSecrets: merged.redactSecrets !== false,
+    selectionMode: mode,
+    selectedTasks: Array.isArray(merged.selectedTasks)
+      ? [...new Set(merged.selectedTasks.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+          .map(id => id.trim()))]
+      : []
   };
+}
+
+/**
+ * Decides whether a task should be synced. The age window is applied first, then
+ * the explicit selection. An `include` list with no entries selects nothing,
+ * which is deliberate: it means "I have not picked any task yet" rather than
+ * silently falling back to syncing everything.
+ */
+export function taskFilterReason(config: SyncConfig, taskId: string, modifiedAt: number, now: number): string | undefined {
+  if (config.maxTaskAgeDays > 0 && modifiedAt < now - config.maxTaskAgeDays * 86_400_000) return '超出时间范围';
+  if (config.selectionMode === 'include' && !config.selectedTasks.includes(taskId)) return '未在同步列表中';
+  if (config.selectionMode === 'exclude' && config.selectedTasks.includes(taskId)) return '已排除';
+  return undefined;
 }
 
 /** Validates a config for actual syncing and returns human-readable problems. */

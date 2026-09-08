@@ -335,7 +335,7 @@ docker compose up -d
 `docker-compose.yml` 是生产编排文件，默认直接拉取：
 
 ```text
-ghcr.io/guyao146/sakura-mcp-server:0.3.1
+ghcr.io/guyao146/sakura-mcp-server:0.3.2
 ```
 
 如果 GHCR Package 设置为 Public，服务器无需 `docker login`。首次发布后请在 GitHub 仓库的 **Packages → sakura-mcp-server → Package settings** 中确认可见性为 **Public**。
@@ -365,7 +365,7 @@ docker compose up -d
 生产 Compose 不需要本地 Dockerfile、Node.js、npm 或完整源码。镜像版本通过 `.env` 覆盖：
 
 ```dotenv
-SAKURA_MCP_IMAGE=ghcr.io/guyao146/sakura-mcp-server:0.3.1
+SAKURA_MCP_IMAGE=ghcr.io/guyao146/sakura-mcp-server:0.3.2
 ```
 
 如果需要固定到其他已发布版本，只需修改 `SAKURA_MCP_IMAGE`，然后执行 `docker compose pull && docker compose up -d`。
@@ -638,7 +638,7 @@ npm.cmd start
 
 ## 当前开发状态
 
-`v0.1.0` 是早期安全 MCP 网关版本；当前 `main` 的应用版本为 `v0.3.1`，对应 GHCR 镜像和生产 Compose 部署版本。
+`v0.1.0` 是早期安全 MCP 网关版本；当前 `main` 的应用版本为 `v0.3.2`，对应 GHCR 镜像和生产 Compose 部署版本。
 
 已完成：
 

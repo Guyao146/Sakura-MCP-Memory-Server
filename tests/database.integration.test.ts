@@ -3,6 +3,7 @@ import { Database } from '../src/database.js';
 import { MemoryRepository } from '../src/memory/repository.js';
 import { SettingsRepository } from '../src/settings/repository.js';
 import { AgentRepository } from '../src/agents/repository.js';
+import { ClientSessionRepository } from '../src/clients/repository.js';
 import { AuthService } from '../src/auth.js';
 import { loadConfig } from '../src/config.js';
 import { requireAgentSpaceScope } from '../src/memory/permissions.js';
@@ -142,6 +143,48 @@ describeDatabase('PostgreSQL installation integration', () => {
     // Deleting the credential cascades its space grants but keeps the space itself.
     expect((await database.query('SELECT 1 FROM agent_space_grants WHERE agent_id=$1', [created.id])).rowCount).toBe(0);
     expect((await spaces.list(identity.userId)).map(row => row.id)).toContain(shared.id);
+  });
+
+  it('tracks MCP client sessions and scopes them per user', async () => {
+    const memory = new MemoryRepository(database);
+    const owner = await memory.ensureUser('client-owner', { displayName: 'Client Owner' });
+    const other = await memory.ensureUser('client-other', { displayName: 'Other Owner' });
+    const clients = new ClientSessionRepository(database);
+    const identity = { userId: owner.userId, authSource: 'api_key', clientName: 'Cline',
+      clientVersion: '4.1.15', protocolVersion: '2025-06-18', remoteAddress: '203.0.113.7' };
+
+    // initialize: no in-flight operation, so the client is merely connected.
+    await clients.touch(identity, { activity: 'initialize' });
+    let rows = await clients.list(owner.userId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ client_name: 'Cline', client_version: '4.1.15', status: 'connected',
+      requestCount: 1, writeCalls: 0, last_activity: 'initialize' });
+
+    // A write tool call in flight reports as uploading until released.
+    await clients.touch(identity, { activity: 'memory_extract_and_remember', delta: 1, isWrite: true });
+    rows = await clients.list(owner.userId);
+    expect(rows[0]).toMatchObject({ status: 'uploading', active_operations: 1, requestCount: 2, writeCalls: 1 });
+    await clients.release(identity);
+    rows = await clients.list(owner.userId);
+    expect(rows[0]).toMatchObject({ status: 'connected', active_operations: 0 });
+
+    // Releasing more times than acquired must not drive the counter negative.
+    await clients.release(identity);
+    expect((await clients.list(owner.userId))[0].active_operations).toBe(0);
+
+    // Another user must not see this session, but a system administrator does.
+    expect(await clients.list(other.userId)).toHaveLength(0);
+    expect((await clients.list(other.userId, { systemAdmin: true })).length).toBeGreaterThanOrEqual(1);
+
+    // An explicit disconnect is reflected, and a later request revives the row.
+    await clients.disconnect(identity);
+    expect((await clients.list(owner.userId))[0].status).toBe('disconnected');
+    await clients.touch(identity, { activity: 'tools/list' });
+    expect((await clients.list(owner.userId))[0].status).toBe('connected');
+
+    // Same user, different client name means a separate session row.
+    await clients.touch({ ...identity, clientName: 'Claude Desktop' });
+    expect(await clients.list(owner.userId)).toHaveLength(2);
   });
 
   it('stores only hashed Web sessions and revokes logout immediately', async () => {
