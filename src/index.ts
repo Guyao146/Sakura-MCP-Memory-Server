@@ -174,7 +174,9 @@ app.get('/auth/callback', async context => {
   try {
     const result = await webSessions.callback(code, state);
     context.header('Set-Cookie', webSessions.cookie(result.token));
-    context.header('Set-Cookie', webSessions.clearProbeHintCookie());
+    // A response can carry both the new session cookie and the old probe-cookie
+    // deletion. Append the second Set-Cookie instead of replacing the session.
+    context.header('Set-Cookie', webSessions.clearProbeHintCookie(), { append: true });
     const identity = await webSessions.authenticate(result.token);
     await audit.record({ actorUserId: identity.userId, authSource: 'authentik', action: 'auth.login', result: 'success' });
     return context.redirect(result.returnTo);

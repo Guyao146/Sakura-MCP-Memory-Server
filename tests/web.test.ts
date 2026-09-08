@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Script } from 'node:vm';
+import { readFile } from 'node:fs/promises';
 import { loadConfig } from '../src/config.js';
 import { adminPage } from '../src/web/admin-page.js';
 import { loginPage } from '../src/web/login-page.js';
 import { adminByGroup, DEFAULT_ADMIN_GROUPS, describeTokenExchangeFailure, WebSessionService, type WebIdentity } from '../src/web/session.js';
+
+const indexSource = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
 
 const config = loadConfig({
   PUBLIC_BASE_URL: 'https://mcp.example.com', DATABASE_URL: 'postgresql://localhost/test',
@@ -163,6 +166,10 @@ describe('Web management security', () => {
     expect(loginPage).toContain("$('whoName').textContent=hint");
     // Switching accounts has to bypass the existing SSO session.
     expect(loginPage).toContain("'&switch=1'");
+  });
+
+  it('appends the probe-cookie deletion instead of replacing the new login session cookie', () => {
+    expect(indexSource).toContain("context.header('Set-Cookie', webSessions.clearProbeHintCookie(), { append: true })");
   });
 
   it('loads the shared self-hosted typeface for a consistent ecosystem look', () => {
