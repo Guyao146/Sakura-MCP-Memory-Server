@@ -2,6 +2,12 @@
 
 本文件记录 Sakura-MCP-Server 的所有重要变更。
 
+## [0.3.3] - 2026-09-08
+
+### 修复
+
+- 修复登录回调同时设置 Sakura 会话 Cookie 和清理 Authentik 登录探测 Cookie 时，后一个 `Set-Cookie` 覆盖前一个的问题。现在两个 Cookie 都会被浏览器正确保存，完成 Authentik 登录后可以正常进入管理后台。
+
 ## [0.3.2] - 2026-08-31
 
 ### 新增
