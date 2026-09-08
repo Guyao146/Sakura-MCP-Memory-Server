@@ -21,12 +21,11 @@ export const loginPage = `<!doctype html>
 <title>登录 · Sakura-MCP-Server</title>
 <meta name="theme-color" content="#12161f">
 <script>try{var t=localStorage.getItem('sakura-theme')||'auto';var d=t==='dark'||(t==='auto'&&matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.dataset.theme=d?'dark':'light'}catch(e){document.documentElement.dataset.theme='dark'}</script>
-<link rel="stylesheet" href="https://api.mcylyr.cn/obj/font/fonts.css">
 <style>
 :root{--bg:#f2f0f1;--ink:#1f181b;--muted:#7d7378;--line:#ded7da;--card:#fff;--accent:#d2647f;--accent-soft:#fbe6ec;--panel-a:#2a1d24;--panel-b:#12161f;--shadow:0 10px 30px rgba(48,34,40,.07)}
 [data-theme=dark]{--bg:#0f1116;--ink:#eceaf0;--muted:#8d8792;--line:#2a2730;--card:#171a21;--accent:#e58aa3;--accent-soft:#2c1f26;--panel-a:#2b1e26;--panel-b:#0c0e14;--shadow:0 10px 30px rgba(0,0,0,.45);color-scheme:dark}
 *{box-sizing:border-box}
-body{margin:0;min-height:100vh;display:grid;grid-template-columns:1.05fr .95fr;background:var(--bg);color:var(--ink);font:14px/1.6 'Noto Sans SC',system-ui,sans-serif;letter-spacing:.01em}
+body{margin:0;min-height:100vh;display:grid;grid-template-columns:1.05fr .95fr;background:var(--bg);color:var(--ink);font:14px/1.6 system-ui,'Microsoft YaHei',sans-serif;letter-spacing:.01em}
 .panel{position:relative;overflow:hidden;padding:clamp(32px,5vw,64px);display:flex;flex-direction:column;justify-content:space-between;background:linear-gradient(150deg,var(--panel-a),var(--panel-b));color:#f4eef1}
 .panel:before,.panel:after{content:'';position:absolute;border-radius:50%;pointer-events:none}
 .panel:before{width:420px;height:420px;right:-150px;top:-130px;background:radial-gradient(circle,rgba(229,138,163,.30),transparent 68%)}
@@ -40,7 +39,7 @@ body{margin:0;min-height:100vh;display:grid;grid-template-columns:1.05fr .95fr;b
 .points li{display:flex;gap:11px;align-items:flex-start}
 .pt{color:var(--accent);font-size:15px;line-height:1.5}
 .panel-foot{position:relative;display:flex;gap:11px;align-items:center;flex-wrap:wrap;font-size:12px;color:rgba(244,238,241,.6)}
-.mono{font:500 11px 'DM Mono',ui-monospace,monospace;letter-spacing:.08em;border:1px solid rgba(244,238,241,.22);border-radius:999px;padding:4px 10px}
+.mono{font:500 11px ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.08em;border:1px solid rgba(244,238,241,.22);border-radius:999px;padding:4px 10px}
 .side{display:flex;align-items:center;justify-content:center;padding:clamp(24px,4vw,48px)}
 main{width:100%;max-width:392px;background:var(--card);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow);padding:clamp(26px,3vw,36px) clamp(24px,3vw,32px);text-align:center}
 main>.logo{margin:0 auto 16px}
@@ -59,7 +58,7 @@ h1{font-size:21px;margin:0 0 7px}
 .themes button{border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:8px;padding:6px 11px;font:inherit;font-size:12px;cursor:pointer}
 .themes button.on{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
 .foot{margin:20px 0 0;padding-top:18px;border-top:1px solid var(--line);font-size:12px;color:var(--muted);line-height:1.7}
-.version{font:500 11px 'DM Mono',ui-monospace,monospace;color:var(--muted)}
+.version{font:500 11px ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--muted)}
 @media(max-width:880px){body{grid-template-columns:1fr;grid-template-rows:auto 1fr}.panel{padding:28px 24px}.copy{margin:24px 0}.headline{font-size:22px;margin-bottom:18px}.points{display:none}.side{padding:24px}}
 </style></head><body>
 <section class="panel">

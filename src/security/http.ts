@@ -12,10 +12,7 @@ export function securityHeaders() {
     context.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
     context.header('Cross-Origin-Opener-Policy', 'same-origin');
     context.header('Cross-Origin-Resource-Policy', 'same-origin');
-    // The login page pulls self-hosted Noto Sans SC / DM Mono from the studio's
-    // shared asset host so every Sakura project renders with one typeface. Only
-    // styles and fonts are allowed from it: scripts stay first-party.
-    context.header('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://api.mcylyr.cn; font-src 'self' https://api.mcylyr.cn; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    context.header('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     if (new URL(context.req.url).protocol === 'https:') context.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     context.header('Cache-Control', context.req.path === '/health' ? 'no-store' : context.res.headers.get('Cache-Control') ?? 'no-store');
   };

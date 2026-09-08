@@ -172,11 +172,10 @@ describe('Web management security', () => {
     expect(indexSource).toContain("context.header('Set-Cookie', webSessions.clearProbeHintCookie(), { append: true })");
   });
 
-  it('loads the shared self-hosted typeface for a consistent ecosystem look', () => {
-    expect(loginPage).toContain('https://api.mcylyr.cn/obj/font/fonts.css');
-    expect(loginPage).toContain("'Noto Sans SC',system-ui,sans-serif");
-    expect(loginPage).toContain("'DM Mono',ui-monospace,monospace");
-    // Fonts are the only third-party dependency: no external scripts or images.
+  it('uses local system fonts without external font dependencies', () => {
+    expect(loginPage).not.toContain('api.mcylyr.cn/obj/font/fonts.css');
+    expect(loginPage).toContain("system-ui,'Microsoft YaHei',sans-serif");
+    expect(loginPage).toContain('ui-monospace,SFMono-Regular,Consolas,monospace');
     expect(loginPage).not.toContain('<script src=');
     expect(loginPage).not.toContain('fonts.googleapis.com');
   });

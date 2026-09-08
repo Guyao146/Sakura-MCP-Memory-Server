@@ -15,14 +15,13 @@ describe('HTTP production security', () => {
     expect(response.headers.get('cache-control')).toBe('no-store');
   });
 
-  it('allows the shared font host for styles and fonts only', async () => {
+  it('keeps styles and fonts first-party', async () => {
     const app = new Hono();
     app.use('*', securityHeaders());
     app.get('/auth/login', context => context.html('<h1>Login</h1>'));
     const policy = (await app.request('https://mcp.example.com/auth/login')).headers.get('content-security-policy') ?? '';
-    expect(policy).toContain("style-src 'self' 'unsafe-inline' https://api.mcylyr.cn");
-    expect(policy).toContain("font-src 'self' https://api.mcylyr.cn");
-    // The asset host must never be able to run code or receive data.
+    expect(policy).toContain("style-src 'self' 'unsafe-inline'");
+    expect(policy).toContain("font-src 'self'");
     expect(policy).toContain("script-src 'self' 'unsafe-inline';");
     expect(policy).toContain("connect-src 'self'");
     expect(policy).not.toContain('script-src \'self\' \'unsafe-inline\' https://api.mcylyr.cn');
