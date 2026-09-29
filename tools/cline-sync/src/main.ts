@@ -12,17 +12,19 @@ import { loadConfig, saveConfig } from './store.js';
 import { dataDir, type SyncConfig } from './config.js';
 import { SyncScheduler } from './scheduler.js';
 import { listTaskInventory } from './sync.js';
+import { loadHistory } from './history.js';
 import { ConfigPanel } from './gui.js';
 import { openPanelWindow } from './window.js';
 import { resolveSysTray } from './systray-interop.js';
-import { prepareTrayBinary } from './tray-binary.js';
+import { prepareTrayBinary, isPackaged } from './tray-binary.js';
 import { trayIconIco, trayIconPng } from './tray-icon.js';
+import { autostartLocation, disableAutostart, enableAutostart, isAutostartEnabled } from './autostart.js';
 
 const log = (message: string) => console.log(`[${new Date().toLocaleTimeString()}] ${message}`);
 
 async function main(): Promise<void> {
   let config = await loadConfig();
-  const scheduler = new SyncScheduler(config, log);
+  const scheduler = new SyncScheduler(config, log, { history: await loadHistory() });
 
   const panel = new ConfigPanel({
     getConfig: () => config,
@@ -35,13 +37,14 @@ async function main(): Promise<void> {
     getStatus: () => scheduler.status(),
     syncNow: async () => { void scheduler.runOnce(); },
     testConnection: cfg => scheduler.testConnection(cfg),
-    listTasks: () => listTaskInventory(config)
+    listTasks: () => listTaskInventory(config),
+    resumeSync: () => scheduler.resume()
   });
 
   const url = await panel.start();
   log(`配置面板：${url}`);
   log(`数据目录：${dataDir()}`);
-  scheduler.restart();
+  scheduler.start();
   const unconfigured = !config.mcpUrl || !config.token;
   if (unconfigured) log('尚未配置 MCP 地址与 Agent 密钥，请在配置窗口中填写。');
 
@@ -88,7 +91,13 @@ async function startTray(url: string, scheduler: SyncScheduler, getConfig: () =>
   const syncItem = { title: '立即同步', tooltip: '马上扫描一次 Cline 任务历史', enabled: true, checked: false };
   const statusItem = { title: '状态：就绪', tooltip: '最近一次同步结果', enabled: false, checked: false };
   const toggleItem = { title: '暂停自动同步', tooltip: '临时停止定时扫描', enabled: true, checked: getConfig().enabled };
+  // Only a packaged build has a stable entry point worth registering at login.
+  const autostartItem = { title: '开机自启', tooltip: '登录时自动启动本程序', enabled: isPackaged(), checked: false };
   const exitItem = { title: '退出', tooltip: '结束后台同步', enabled: true, checked: false };
+  if (autostartItem.enabled) {
+    autostartItem.checked = await isAutostartEnabled().catch(() => false);
+    log(`开机自启：${autostartItem.checked ? '已开启（' + autostartLocation() + '）' : '未开启'}`);
+  }
 
   let tray: import('systray2').default;
   try {
@@ -98,7 +107,7 @@ async function startTray(url: string, scheduler: SyncScheduler, getConfig: () =>
         isTemplateIcon: process.platform === 'darwin',
         title: 'Sakura Sync',
         tooltip: 'Sakura Cline Sync',
-        items: [openItem, syncItem, statusItem, SysTray.separator, toggleItem, exitItem]
+        items: [openItem, syncItem, statusItem, SysTray.separator, toggleItem, autostartItem, SysTray.separator, exitItem]
       },
       debug: false,
       copyDir: true
@@ -122,6 +131,20 @@ async function startTray(url: string, scheduler: SyncScheduler, getConfig: () =>
         toggleItem.checked = enabled;
         toggleItem.title = enabled ? '暂停自动同步' : '恢复自动同步';
         tray.sendAction({ type: 'update-item', item: toggleItem, seq_id: action.seq_id });
+      })();
+      return;
+    }
+    if (title === autostartItem.title) {
+      void (async () => {
+        try {
+          if (autostartItem.checked) await disableAutostart();
+          else await enableAutostart();
+          autostartItem.checked = !autostartItem.checked;
+          tray.sendAction({ type: 'update-item', item: autostartItem, seq_id: action.seq_id });
+          log(autostartItem.checked ? `已开启开机自启（${autostartLocation()}）` : '已关闭开机自启');
+        } catch (error) {
+          log(`开机自启设置失败：${error instanceof Error ? error.message : error}`);
+        }
       })();
       return;
     }

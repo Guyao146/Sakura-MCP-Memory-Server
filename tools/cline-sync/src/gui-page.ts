@@ -60,6 +60,11 @@ select{width:100%;background:#101621;border:1px solid var(--line);color:var(--te
   <div id="taskSummary" class="muted" style="margin-top:8px;font-size:12px"></div>
   <button onclick="saveSelection()">保存选择</button>
 </div>
+<div id="haltCard" class="card" style="display:none;border-color:var(--bad)">
+  <h1 style="font-size:15px;margin:0 0 8px;color:var(--bad)">已自动暂停</h1>
+  <div class="muted" style="font-size:12px">连续多次同步全部失败，可能是 MCP 地址不可达或 Agent 密钥已失效。检查后点击恢复。</div>
+  <button class="secondary" onclick="resume()">恢复自动同步</button>
+</div>
 <div class="card status">
   <h1 style="font-size:15px;margin:0 0 8px">状态</h1>
   <div>自动同步：<span id="stEnabled">-</span></div>
@@ -67,6 +72,8 @@ select{width:100%;background:#101621;border:1px solid var(--line);color:var(--te
   <div>下次运行：<span id="stNext">-</span></div>
   <div>上次结果：<span id="stResult">-</span></div>
   <div class="list" id="stList"></div>
+  <div class="muted" style="margin-top:10px;font-size:12px">累计同步任务 <b id="stTasks">-</b> · 推送消息 <b id="stMessages">-</b> · 抽取调用 <b id="stExtractions">-</b> · 失败任务 <b id="stFailed">-</b></div>
+  <div class="list" id="stRuns"></div>
 </div>
 </main>
 <script>
@@ -87,7 +94,8 @@ function willSyncTask(t,mode,checked){if(t.outOfWindow)return false;if(mode==='i
 function toggle(id,on){var i=selected.indexOf(id);if(on&&i<0)selected.push(id);if(!on&&i>=0)selected.splice(i,1);renderTasks()}
 function checkAll(on){if($('selectionMode').value==='all'){setMsg('当前为「全部」模式，勾选无效','muted');return}selected=on?tasks.map(function(t){return t.taskId}):[];renderTasks()}
 function saveSelection(){setMsg('保存中…');api('/api/config',{method:'POST',body:JSON.stringify({selectionMode:$('selectionMode').value,selectedTasks:selected})}).then(function(r){if(r.ok){setMsg('选择已保存','ok');loadTasks()}else setMsg(r.d.error||'保存失败','bad')})}
-function renderStatus(s){$('stEnabled').textContent=s.enabled?'开启':'关闭';$('stLast').textContent=s.lastRunAt||'从未';$('stNext').textContent=s.nextRunAt||'-';$('stResult').textContent=s.lastResult||'-';var list=$('stList');list.innerHTML='';(s.recent||[]).forEach(function(o){var d=document.createElement('div');d.className='item';var a=document.createElement('span');a.textContent=o.taskId;var b=document.createElement('span');b.textContent=o.status+(o.newMessages?(' · '+o.newMessages+' 条'):'')+(o.reason?(' · '+o.reason):'');b.className=o.status==='synced'?'ok':o.status==='failed'?'bad':'muted';d.append(a,b);list.append(d)})}
+function renderStatus(s){$('stEnabled').textContent=s.enabled?'开启':'关闭';$('stLast').textContent=s.lastRunAt||'从未';$('stNext').textContent=s.nextRunAt||'-';$('stResult').textContent=s.lastResult||'-';$('haltCard').style.display=s.halted?'block':'none';var list=$('stList');list.innerHTML='';(s.recent||[]).forEach(function(o){var d=document.createElement('div');d.className='item';var a=document.createElement('span');a.textContent=o.taskId;var b=document.createElement('span');b.textContent=o.status+(o.newMessages?(' · '+o.newMessages+' 条'):'')+(o.reason?(' · '+o.reason):'');b.className=o.status==='synced'?'ok':o.status==='failed'?'bad':'muted';d.append(a,b);list.append(d)});var t=(s.history&&s.history.totals)||{};$('stTasks').textContent=t.syncedTasks||0;$('stMessages').textContent=t.messages||0;$('stExtractions').textContent=t.extractions||0;$('stFailed').textContent=t.failedTasks||0;var runs=$('stRuns');runs.innerHTML='';(s.history&&s.history.runs?s.history.runs.slice().reverse().slice(0,8):[]).forEach(function(r){var d=document.createElement('div');d.className='item';var a=document.createElement('span');a.className='muted';a.textContent=new Date(r.finishedAt).toLocaleString();var b=document.createElement('span');b.textContent='同步 '+r.synced+' · 跳过 '+r.skipped+' · 失败 '+r.failed+(r.messages?(' · '+r.messages+' 条'):'');b.className=r.failed>0?'bad':'ok';d.append(a,b);runs.append(d)})}
+function resume(){setMsg('恢复中…');api('/api/resume',{method:'POST'}).then(function(r){if(r.ok){setMsg('已恢复自动同步','ok');load()}else setMsg(r.d.error||'恢复失败','bad')})}
 function collect(){return{mcpUrl:$('mcpUrl').value,token:$('token').value,clineTasksDir:$('clineTasksDir').value,intervalMinutes:Number($('intervalMinutes').value),maxTaskAgeDays:Number($('maxTaskAgeDays').value),redactSecrets:$('redactSecrets').checked,enabled:$('enabled').checked,selectionMode:$('selectionMode').value,selectedTasks:selected}}
 function load(){api('/api/state').then(function(r){if(r.ok){render(r.d);setMsg('就绪')}else setMsg(r.d.error||'加载失败','bad')})}
 function save(){setMsg('保存中…');api('/api/config',{method:'POST',body:JSON.stringify(collect())}).then(function(r){if(r.ok){setMsg('已保存','ok');load();loadTasks()}else setMsg(r.d.error||'保存失败','bad')})}

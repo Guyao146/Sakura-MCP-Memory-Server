@@ -20,6 +20,13 @@ describe('config panel page', () => {
     expect(panelHtml).toContain('id.textContent=t.taskId');
   });
 
+  it('exposes the circuit breaker and cumulative stats', () => {
+    expect(panelHtml).toContain('haltCard');
+    expect(panelHtml).toContain('恢复自动同步');
+    expect(panelHtml).toContain('/api/resume');
+    expect(panelHtml).toContain('stExtractions');
+  });
+
   it('summarises the cost of the next run', () => {
     expect(panelHtml).toContain('本次将同步 ');
     expect(panelHtml).toContain('次抽取调用');

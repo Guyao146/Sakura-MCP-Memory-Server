@@ -37,7 +37,7 @@ export class McpClient {
   async initialize(timeoutMs = 20_000): Promise<void> {
     const result = await this.rpc('initialize', {
       protocolVersion: PROTOCOL_VERSION, capabilities: {},
-      clientInfo: { name: 'sakura-cline-sync', version: '0.1.0' }
+      clientInfo: { name: 'sakura-cline-sync', version: '0.2.0' }
     }, timeoutMs) as { error?: { message?: string } };
     if (result?.error) throw new Error(result.error.message ?? 'initialize failed');
   }

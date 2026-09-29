@@ -8,6 +8,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { randomBytes } from 'node:crypto';
 import { normalizeConfig, validateConfig, type SyncConfig } from './config.js';
 import type { TaskInventoryItem } from './sync.js';
+import type { SyncHistory } from './history.js';
 import { panelHtml } from './gui-page.js';
 
 export interface PanelHooks {
@@ -17,15 +18,19 @@ export interface PanelHooks {
   syncNow: () => Promise<void>;
   testConnection: (config: SyncConfig) => Promise<{ ok: boolean; error?: string }>;
   listTasks: () => Promise<TaskInventoryItem[]>;
+  resumeSync: () => void;
 }
 
 export interface PanelStatus {
   enabled: boolean;
   running: boolean;
+  /** True when the circuit breaker stopped the scheduler. */
+  halted: boolean;
   lastRunAt: string | null;
   nextRunAt: string | null;
   lastResult: string | null;
   recent: Array<{ taskId: string; status: string; newMessages: number; reason?: string }>;
+  history: SyncHistory;
 }
 
 export class ConfigPanel {
@@ -93,6 +98,10 @@ export class ConfigPanel {
       if (request.method === 'POST' && url.pathname === '/api/sync') {
         await this.hooks.syncNow();
         return this.json(response, 200, { started: true, status: this.hooks.getStatus() });
+      }
+      if (request.method === 'POST' && url.pathname === '/api/resume') {
+        this.hooks.resumeSync();
+        return this.json(response, 200, { resumed: true, status: this.hooks.getStatus() });
       }
       if (request.method === 'GET' && url.pathname === '/api/tasks') {
         return this.json(response, 200, { tasks: await this.hooks.listTasks() });
