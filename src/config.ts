@@ -15,6 +15,9 @@ const environmentSchema = z.object({
   AUTHENTIK_AUDIENCE: z.string().optional().or(z.literal('')),
   AUTHENTIK_JWKS_URI: optionalUrl,
   AUTHENTIK_SCOPE_CLAIM: z.string().default('scope'),
+  LOCAL_LOGIN: z.enum(['true', 'false']).optional().or(z.literal('')),
+  LOCAL_ADMIN_USERNAME: z.string().optional().or(z.literal('')),
+  LOCAL_ADMIN_PASSWORD: z.string().optional().or(z.literal('')),
   DATABASE_URL: z.string().min(1),
   POSTGRES_HOST: z.string().default('postgres'),
   DATABASE_MAX_CONNECTIONS: z.coerce.number().int().min(1).max(100).default(20),
@@ -54,6 +57,7 @@ export interface AppConfig {
     clientId?: string; authorizationUrl?: string; tokenUrl?: string; userinfoUrl?: string; endSessionUrl?: string;
     groupsClaim?: string; adminGroups?: string[];
   };
+  localLogin: { enabled: boolean; adminUsername?: string; adminPassword?: string };
   database: { connectionString: string; host: string; maxConnections: number; autoMigrate: boolean };
   setup: { encryptionKey: string };
   openaiCompatible?: { baseUrl: string; apiKey?: string; chatModel?: string; embeddingModel?: string };
@@ -85,11 +89,20 @@ export function loadConfig(env = process.env): AppConfig {
   if (authEnabled && oauthValues.some(Boolean) && !oauthValues.every(Boolean)) {
     throw new Error('AUTHENTIK_ISSUER, AUTHENTIK_AUDIENCE and AUTHENTIK_JWKS_URI must be configured together.');
   }
+  // Local accounts are the default way to log in without an external OIDC
+  // provider; an explicit LOCAL_LOGIN chooses the opposite for mixed setups.
+  const localExplicit = value.LOCAL_LOGIN === 'true' ? true : value.LOCAL_LOGIN === 'false' ? false : undefined;
+  const adminUsername = value.LOCAL_ADMIN_USERNAME || undefined;
+  const adminPassword = value.LOCAL_ADMIN_PASSWORD || undefined;
   return {
     publicBaseUrl: value.PUBLIC_BASE_URL.replace(/\/$/, ''), host: value.HOST, port: value.PORT, logLevel: value.LOG_LEVEL,
     authEnabled,
     apiKeys: parseApiKeys(value.MCP_API_KEYS),
     authentik: authEnabled && oauthValues.every(Boolean) ? { issuer: value.AUTHENTIK_ISSUER!, audience: value.AUTHENTIK_AUDIENCE!, jwksUri: value.AUTHENTIK_JWKS_URI!, scopeClaim: value.AUTHENTIK_SCOPE_CLAIM } : undefined,
+    localLogin: {
+      enabled: authEnabled && (localExplicit ?? (!oauthValues.every(Boolean) || Boolean(adminUsername))),
+      adminUsername, adminPassword
+    },
     database: { connectionString: value.DATABASE_URL, host: value.POSTGRES_HOST, maxConnections: value.DATABASE_MAX_CONNECTIONS, autoMigrate: value.AUTO_MIGRATE === 'true' },
     setup: { encryptionKey: value.CONFIG_ENCRYPTION_KEY },
     openaiCompatible: value.OPENAI_COMPATIBLE_BASE_URL ? { baseUrl: value.OPENAI_COMPATIBLE_BASE_URL.replace(/\/$/, ''), apiKey: value.OPENAI_COMPATIBLE_API_KEY || undefined, chatModel: value.OPENAI_COMPATIBLE_CHAT_MODEL || undefined, embeddingModel: value.OPENAI_COMPATIBLE_EMBEDDING_MODEL || undefined } : undefined,

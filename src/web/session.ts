@@ -7,9 +7,12 @@ import { MemoryRepository } from '../memory/repository.js';
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const base64url = (value: Buffer) => value.toString('base64url');
 
+/** How a web session was created. Recorded per session so logout and audit entries reflect the real method. */
+export type WebAuthSource = 'authentik' | 'local';
+
 export interface WebIdentity {
   sessionId: string; userId: string; subject: string; email: string | null; displayName: string;
-  avatarUrl: string | null; isSystemAdmin: boolean; expiresAt: string;
+  avatarUrl: string | null; isSystemAdmin: boolean; expiresAt: string; authSource: WebAuthSource;
 }
 
 /**
@@ -157,11 +160,21 @@ export class WebSessionService {
     const identity = await new MemoryRepository(this.database).ensureUser(payload.sub, {
       email, displayName, adminByGroup: adminByGroup(payload, auth)
     });
+    return this.issueSession(identity.userId, attempt.return_to, 'authentik');
+  }
+
+  /**
+   * Mints a web session for a user that has already authenticated by any
+   * method. Both the OIDC callback and the local (username/password) login
+   * funnel through here so session cookies, expiry and return-target handling
+   * stay identical.
+   */
+  async issueSession(userId: string, returnTo: string, authSource: WebAuthSource): Promise<{ token: string; returnTo: string }> {
     const token = `sess_${base64url(randomBytes(32))}`;
     await this.database.query(
-      `INSERT INTO web_sessions(user_id,token_hash,expires_at) VALUES($1,$2,now()+interval '12 hours')`,
-      [identity.userId, hash(token)]);
-    return { token, returnTo: attempt.return_to };
+      `INSERT INTO web_sessions(user_id,token_hash,auth_source,expires_at) VALUES($1,$2,$3,now()+interval '12 hours')`,
+      [userId, hash(token), authSource]);
+    return { token, returnTo: safeReturnPath(returnTo, this.getConfig().publicBaseUrl) };
   }
 
   /**
@@ -214,16 +227,17 @@ export class WebSessionService {
     if (!token?.startsWith('sess_')) throw new Error('Web session is missing.');
     const result = await this.database.query<{
       session_id: string; user_id: string; oidc_subject: string; email: string | null; display_name: string;
-      avatar_url: string | null; is_system_admin: boolean; expires_at: string;
+      avatar_url: string | null; is_system_admin: boolean; expires_at: string; auth_source: WebAuthSource;
     }>(
-      `SELECT ws.id AS session_id,u.id AS user_id,u.oidc_subject,u.email,u.display_name,u.avatar_url,u.is_system_admin,ws.expires_at
+      `SELECT ws.id AS session_id,u.id AS user_id,u.oidc_subject,u.email,u.display_name,u.avatar_url,u.is_system_admin,ws.expires_at,ws.auth_source
        FROM web_sessions ws JOIN users u ON u.id=ws.user_id
        WHERE ws.token_hash=$1 AND ws.revoked_at IS NULL AND ws.expires_at>now()`, [hash(token)]);
     const row = result.rows[0];
     if (!row) throw new Error('Web session is invalid, expired, or revoked.');
     await this.database.query('UPDATE web_sessions SET last_seen_at=now() WHERE id=$1', [row.session_id]);
     return { sessionId: row.session_id, userId: row.user_id, subject: row.oidc_subject, email: row.email,
-      displayName: row.display_name, avatarUrl: row.avatar_url, isSystemAdmin: row.is_system_admin, expiresAt: row.expires_at };
+      displayName: row.display_name, avatarUrl: row.avatar_url, isSystemAdmin: row.is_system_admin,
+      expiresAt: row.expires_at, authSource: row.auth_source ?? 'authentik' };
   }
 
   async logout(token: string | undefined): Promise<void> {
@@ -282,7 +296,7 @@ export class WebSessionService {
     return {
       sessionId: '00000000-0000-4000-8000-000000000001', userId: identity.userId, subject: 'local-admin',
       email: null, displayName: 'Local Administrator', avatarUrl: null, isSystemAdmin: true,
-      expiresAt: '9999-12-31T23:59:59.999Z'
+      expiresAt: '9999-12-31T23:59:59.999Z', authSource: 'local'
     };
   }
 

@@ -26,7 +26,8 @@ import { SettingsRepository } from './settings/repository.js';
 import { WebSessionService } from './web/session.js';
 import type { WebIdentity } from './web/session.js';
 import { adminPage } from './web/admin-page.js';
-import { loginPage } from './web/login-page.js';
+import { localLoginPage, loginPage } from './web/login-page.js';
+import { LocalLoginService } from './web/local-login.js';
 import { attachmentHeader } from './security/http.js';
 import { createHttpApp } from './security/app.js';
 import { APP_VERSION, UpdateChecker } from './version.js';
@@ -46,6 +47,19 @@ const settings = new SettingsRepository(database, baseConfig.setup.encryptionKey
 let config = await settings.apply(baseConfig);
 let auth = new AuthService(config, database);
 const setup = new SetupService(baseConfig.authEnabled, baseConfig.publicBaseUrl, database, settings);
+const localLogins = new LocalLoginService(database);
+// An administrator declared through the environment is provisioned on every
+// boot, so rotating the password only requires restarting with a new value.
+if (config.localLogin.enabled && config.localLogin.adminUsername && config.localLogin.adminPassword) {
+  try {
+    logger.info({ username: config.localLogin.adminUsername }, 'Provisioning local administrator account');
+    await localLogins.upsert(config.localLogin.adminUsername, config.localLogin.adminPassword, {
+      displayName: 'Administrator', isSystemAdmin: true
+    });
+  } catch (error) {
+    logger.warn({ error: error instanceof Error ? error.message : 'unknown' }, 'Local administrator provisioning failed');
+  }
+}
 const updateChecker = new UpdateChecker();
 const webSessions = new WebSessionService(database, () => config);
 const memories = new MemoryRepository(database);
@@ -128,6 +142,11 @@ app.post('/api/setup/complete', async context => {
 app.get('/auth/login', async context => {
   if (!(await settings.installation()).completed) return context.redirect('/setup');
   if (!config.authEnabled) return context.redirect('/admin');
+  // No external OIDC provider: the local username/password page is the only way in.
+  if (!config.authentik) {
+    if (config.localLogin.enabled) return context.html(localLoginPage);
+    return context.json({ error: 'auth_misconfigured', error_description: 'No login method is configured. Set AUTHENTIK_* or enable LOCAL_LOGIN.' }, 500);
+  }
   // Probe once per visit. `probed=1` marks the round trip as done so a provider
   // error can never bounce the visitor between here and Authentik forever.
   if (context.req.query('probed') !== '1' && !context.req.query('reason')) {
@@ -157,6 +176,42 @@ app.get('/auth/start', async context => {
   }
   catch (error) { return context.json({ error: 'login_failed', error_description: error instanceof Error ? error.message : 'Login failed.' }, 500); }
 });
+app.get('/auth/local-login', async context => {
+  if (!(await settings.installation()).completed) return context.redirect('/setup');
+  if (!config.authEnabled) return context.redirect('/admin');
+  if (!config.localLogin.enabled) return context.json({ error: 'not_found', error_description: '本地登录未启用。' }, 404);
+  return context.html(localLoginPage);
+});
+
+/** Public metadata only: which login methods this installation accepts. */
+app.get('/auth/modes', async context => context.json({ oidc: Boolean(config.authentik), local: config.localLogin.enabled }));
+
+const localLoginInputSchema = z.object({
+  username: z.string().min(3).max(60), password: z.string().min(1).max(200), return_to: z.string().max(500).optional()
+});
+
+app.post('/auth/local', async context => {
+  if (!config.authEnabled || !config.localLogin.enabled) {
+    return context.json({ error: 'not_found', error_description: '本地登录未启用。' }, 404);
+  }
+  try {
+    if (!(await settings.installation()).completed) throw new Error('安装尚未完成，请先访问 /setup。');
+    const body = localLoginInputSchema.parse(await context.req.json());
+    const account = await localLogins.login(body.username, body.password);
+    const session = await webSessions.issueSession(account.userId, body.return_to ?? '/admin', 'local');
+    await audit.record({ actorUserId: account.userId, authSource: 'local', action: 'auth.login', result: 'success',
+      metadata: { username: account.username } });
+    context.header('Set-Cookie', webSessions.cookie(session.token));
+    return context.json({ redirectTo: session.returnTo });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Login failed.';
+    await audit.record({ authSource: 'local', action: 'auth.login', result: 'error', metadata: { message } });
+    // Never distinguish an unknown username from a wrong password; only lockout
+    // notices surface, because the legitimate owner needs to know when to wait.
+    return context.json({ error: 'login_failed', error_description: message.includes('锁定') ? message : '用户名或密码不正确。' }, 400);
+  }
+});
+
 app.get('/auth/callback', async context => {
   if (!config.authEnabled) return context.json({ error: 'auth_disabled', error_description: 'Authentication is disabled.' }, 404);
   const code = context.req.query('code'); const state = context.req.query('state');
@@ -206,7 +261,7 @@ app.post('/auth/logout', async context => {
       return context.json({ error: 'csrf_failed', error_description: 'CSRF token is missing or invalid.' }, 403);
     }
     await webSessions.logout(token);
-    await audit.record({ actorUserId: identity.userId, authSource: 'authentik', action: 'auth.logout', result: 'success' });
+    await audit.record({ actorUserId: identity.userId, authSource: identity.authSource, action: 'auth.logout', result: 'success' });
     context.header('Set-Cookie', webSessions.clearCookie());
     return context.json({ loggedOut: true, redirectTo: webSessions.endSessionUrl() ?? '/auth/login?reason=logged_out' });
   } catch (error) {
@@ -217,9 +272,19 @@ app.get('/api/me', async context => {
   try {
     const identity = await adminIdentity(context);
     return context.json({ id: identity.userId, email: identity.email, displayName: identity.displayName,
-      avatarUrl: identity.avatarUrl, isSystemAdmin: identity.isSystemAdmin, expiresAt: identity.expiresAt });
+      avatarUrl: identity.avatarUrl, isSystemAdmin: identity.isSystemAdmin, expiresAt: identity.expiresAt,
+      authSource: identity.authSource, localLogin: config.localLogin.enabled });
   } catch (error) { return context.json({ error: 'unauthorized', error_description: error instanceof Error ? error.message : 'Unauthorized.' }, 401); }
 });
+app.post('/api/me/password', async context => adminApi(context, true, async identity => {
+  if (!config.localLogin.enabled) throw new Error('本地登录未启用。');
+  const body = z.object({
+    currentPassword: z.string().min(1).max(500),
+    newPassword: z.string().min(8).max(200)
+  }).parse(await context.req.json());
+  await localLogins.changePassword(identity.userId, body.currentPassword, body.newPassword);
+  return { changed: true };
+}));
 app.get('/admin', async context => {
   if (!(await settings.installation()).completed) return context.redirect('/setup');
   if (!config.authEnabled) return context.html(adminPage);
@@ -311,14 +376,14 @@ app.get('/api/admin/exports', async context => {
     identity = await adminIdentity(context);
     const query = z.object({ space_id: z.string().uuid(), format: z.enum(['json','markdown']).default('json') }).parse(context.req.query());
     const exported = await transfer.export(identity.userId, query.space_id, query.format);
-    await audit.record({ actorUserId: identity.userId, spaceId: query.space_id, authSource: webAuthSource(),
+    await audit.record({ actorUserId: identity.userId, spaceId: query.space_id, authSource: webAuthSource(identity),
       action: 'web.GET./api/admin/exports', targetType: 'space_export', targetId: query.space_id, result: 'success', metadata: { format: query.format } });
     context.header('Content-Type', `${exported.mimeType}; charset=utf-8`);
     context.header('Content-Disposition', attachmentHeader(exported.filename));
     if (exported.truncated) context.header('X-Export-Truncated', String(exported.rowCount));
     return context.body(exported.content);
   } catch (error) {
-    await audit.record({ actorUserId: identity?.userId, authSource: identity ? webAuthSource() : undefined,
+    await audit.record({ actorUserId: identity?.userId, authSource: identity ? webAuthSource(identity) : undefined,
       action: 'web.GET./api/admin/exports', result: 'error', metadata: { message: error instanceof Error ? error.message : 'Export failed.' } });
     return context.json({ error: 'export_failed', error_description: error instanceof Error ? error.message : 'Export failed.' }, 400);
   }
@@ -400,6 +465,36 @@ app.put('/api/admin/authentik', async context => adminApi(context, true, async i
   return { saved: true, publicClient: validation.publicClient,
     restartRequired: !baseConfig.authEnabled, message: baseConfig.authEnabled
       ? 'Authentik 配置已保存并立即生效。' : 'Authentik 配置已保存。请将 AUTH 恢复为 true 并重启应用。' };
+}));
+app.get('/api/admin/local-users', async context => adminApi(context, false, async identity => {
+  if (!identity.isSystemAdmin) throw new Error('System administrator permission is required.');
+  return { users: await localLogins.list() };
+}));
+app.post('/api/admin/local-users', async context => adminApi(context, true, async identity => {
+  if (!identity.isSystemAdmin) throw new Error('System administrator permission is required.');
+  const body = z.object({
+    username: z.string().min(3).max(60).regex(/^[A-Za-z0-9._-]+$/,
+      '用户名只能包含字母、数字、点、下划线和连字符，长度为 3 到 60 个字符。'),
+    password: z.string().min(8).max(200),
+    displayName: z.string().min(1).max(120).optional(),
+    email: z.email().optional(),
+    isSystemAdmin: z.boolean().optional()
+  }).parse(await context.req.json());
+  const account = await localLogins.upsert(body.username, body.password, {
+    displayName: body.displayName, email: body.email, isSystemAdmin: body.isSystemAdmin ?? false
+  });
+  return { saved: true, userId: account.userId };
+}));
+app.put('/api/admin/local-users/:username', async context => adminApi(context, true, async identity => {
+  if (!identity.isSystemAdmin) throw new Error('System administrator permission is required.');
+  const body = z.object({ password: z.string().min(8).max(200) }).parse(await context.req.json());
+  await localLogins.setPassword(context.req.param('username'), body.password);
+  return { saved: true };
+}));
+app.delete('/api/admin/local-users/:username', async context => adminApi(context, true, async identity => {
+  if (!identity.isSystemAdmin) throw new Error('System administrator permission is required.');
+  await localLogins.remove(context.req.param('username'));
+  return { saved: true };
 }));
 app.get('/api/admin/audit', async context => adminApi(context, false, async identity => {
   const query = z.object({ space_id: z.string().uuid().optional(), action: z.string().max(200).optional(),
@@ -566,20 +661,20 @@ async function adminApi(context: Context, write: boolean, handler: (identity: We
   try {
     identity = await adminIdentity(context);
     if (write && !webSessions.verifyCsrf(identity, context.req.header('x-csrf-token'))) {
-      await audit.record({ actorUserId: identity.userId, authSource: webAuthSource(), action, result: 'error',
+      await audit.record({ actorUserId: identity.userId, authSource: webAuthSource(identity), action, result: 'error',
         metadata: { reason: 'csrf_failed' } });
       return context.json({ error: 'csrf_failed', error_description: 'CSRF token is missing or invalid.' }, 403);
     }
     const result = await handler(identity);
     const object = result && typeof result === 'object' ? result as Record<string, unknown> : {};
-    await audit.record({ actorUserId: identity.userId, authSource: webAuthSource(), action,
+    await audit.record({ actorUserId: identity.userId, authSource: webAuthSource(identity), action,
       spaceId: auditUuid(context.req.query('space_id')) ?? auditUuid(object.space_id) ?? auditUuid(object.spaceId),
       targetId: auditUuid(context.req.param('id')) ?? auditUuid(object.id), result: 'success' });
     return context.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Request failed.';
     const unauthorized = /session is|session is missing/i.test(message);
-    await audit.record({ actorUserId: identity?.userId, authSource: identity ? webAuthSource() : undefined, action, result: 'error', metadata: { message } });
+    await audit.record({ actorUserId: identity?.userId, authSource: identity ? webAuthSource(identity) : undefined, action, result: 'error', metadata: { message } });
     return context.json({ error: unauthorized ? 'unauthorized' : 'request_failed', error_description: message }, unauthorized ? 401 : 400);
   }
 }
@@ -588,4 +683,4 @@ function auditUuid(value: unknown): string | undefined {
   return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value) ? value : undefined;
 }
 
-function webAuthSource(): 'authentik' | 'local' { return config.authEnabled ? 'authentik' : 'local'; }
+function webAuthSource(identity: WebIdentity): 'authentik' | 'local' { return identity.authSource; }

@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 新增服务器本地账号登录：`/auth/login` 在未配置 Authentik 时渲染账号密码登录页，安装向导也可勾选「不使用 Authentik，改用服务器本地账号密码登录」创建首位管理员。密码以 scrypt（PHC 格式、随机盐）哈希存入 `local_credentials`，连续失败 5 次锁定账号并按 5→10→20→40→60 分钟递增锁定时长，锁定期间即使密码正确也无法登录；登录失败不区分「用户名不存在」与「密码错误」。本地账号仅用于管理后台 Web 会话，MCP 接口仍使用 Bearer API Key。混合部署可用 `LOCAL_LOGIN=true` 与本地账号并存，登录页通过 `/auth/modes` 互相切换。
+- 本地账号可通过环境变量 `LOCAL_ADMIN_USERNAME`/`LOCAL_ADMIN_PASSWORD` 在启动时幂等创建（改密码后重启即生效），或由系统管理员经 `/api/admin/local-users` 增删改；登录后可在「修改密码」接口自助更换（需提供当前密码）。安装迁移新增 `013_local_login.sql`，并为 `web_sessions` 增加 `auth_source` 列，使审计与退出登录记录真实来源。
+- `/auth/local`、`/api/me/password` 等登录类接口纳入 `/auth/*` 限流（默认每分钟 20 次/ IP）。
+
 ### 性能优化
 
 - MCP 会话跟踪与工具共用当前请求的身份查询；资料、管理员状态、个人空间与成员关系均未变化时只读查询，避免重复事务写入。不增加跨请求权限缓存。

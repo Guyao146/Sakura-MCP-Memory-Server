@@ -3,7 +3,7 @@ import { Script } from 'node:vm';
 import { readFile } from 'node:fs/promises';
 import { loadConfig } from '../src/config.js';
 import { adminPage } from '../src/web/admin-page.js';
-import { loginPage } from '../src/web/login-page.js';
+import { loginPage, localLoginPage } from '../src/web/login-page.js';
 import { adminByGroup, DEFAULT_ADMIN_GROUPS, describeTokenExchangeFailure, WebSessionService, type WebIdentity } from '../src/web/session.js';
 
 const indexSource = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
@@ -15,7 +15,7 @@ const config = loadConfig({
 const identity: WebIdentity = {
   sessionId: '10000000-0000-4000-8000-000000000001', userId: '20000000-0000-4000-8000-000000000002',
   subject: 'subject', email: 'user@example.com', displayName: 'User', avatarUrl: null, isSystemAdmin: false,
-  expiresAt: new Date(Date.now() + 3600000).toISOString()
+  expiresAt: new Date(Date.now() + 3600000).toISOString(), authSource: 'authentik'
 };
 
 describe('Web management security', () => {
@@ -53,6 +53,21 @@ describe('Web management security', () => {
     expect(service.verifyCsrf(identity, token)).toBe(true);
     expect(service.verifyCsrf({ ...identity, sessionId: '30000000-0000-4000-8000-000000000003' }, token)).toBe(false);
     expect(service.verifyCsrf(identity, 'invalid')).toBe(false);
+  });
+
+  it('issues sessions for any login method with the auth source recorded', async () => {
+    const calls: Array<{ text: string; values: unknown[] }> = [];
+    const database = {
+      query: async (text: string, values: unknown[]) => { calls.push({ text, values }); return { rows: [] }; }
+    };
+    const service = new WebSessionService(database as never, () => config);
+    const local = await service.issueSession('user-2', '/admin', 'local');
+    expect(local.token.startsWith('sess_')).toBe(true);
+    expect(local.returnTo).toBe('/admin');
+    expect(calls[0].text).toContain('auth_source');
+    expect(calls[0].values).toEqual(['user-2', expect.any(String), 'local']);
+    const safe = await service.issueSession('user-2', '//evil.example.com/path', 'local');
+    expect(safe.returnTo).toBe('/admin');
   });
 
   it('uses textContent for server data and does not template user identity into HTML', () => {
@@ -197,6 +212,24 @@ describe('Web management security', () => {
     expect(script).toContain("/^\\/(?!\\/)/.test(target)?target:'/admin'");
     expect(script).toContain("encodeURIComponent(safeTarget)");
     for (const reason of ['expired', 'logged_out', 'probe_failed']) expect(script).toContain(`${reason}:`);
+  });
+
+  it('renders a local login page that posts credentials without templating', () => {
+    for (const marker of ['id="localForm"', 'id="username"', 'id="password"', "id=\"submitButton\"", '/auth/local']) {
+      expect(localLoginPage).toContain(marker);
+    }
+    expect(localLoginPage).not.toContain('${');
+    expect(localLoginPage).not.toContain('innerHTML');
+    expect(localLoginPage).toContain("$('notice').textContent=");
+    // The OIDC path is only offered when the installation actually has one.
+    expect(localLoginPage).toContain("fetch('/auth/modes')");
+    expect(localLoginPage).toContain("if(d&&d.oidc)");
+    const script = localLoginPage.match(/<script>([\s\S]*?)<\/script>/g)?.pop()?.replace(/<\/?script>/g, '');
+    expect(script).toBeTruthy();
+    expect(() => new Script(script!)).not.toThrow();
+    expect(script).toContain("JSON.stringify(body)");
+    expect(script).toContain("location.href=out.data.redirectTo||'/admin'");
+    expect(script).toContain("/^\\/(?!\\/)/.test(target)?target:'/admin'");
   });
 
   it('grants system administration from configured Authentik groups', () => {

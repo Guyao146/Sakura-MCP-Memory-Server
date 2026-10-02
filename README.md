@@ -481,12 +481,28 @@ auth=false
 - 管理后台会永久显示红色安全警告；
 - 任何能连接该站点的人都拥有完整管理和记忆访问权限。
 
-公网部署不要设置 `AUTH=false`。已完成安装的实例可以通过修改该变量并重启容器切换模式；从无认证模式恢复 `AUTH=true` 前，必须确保数据库或环境变量中已有完整 Authentik 配置，否则浏览器登录不可用。
+公网部署不要设置 `AUTH=false`。已完成安装的实例可以通过修改该变量并重启容器切换模式；从无认证模式恢复 `AUTH=true` 前，必须确保数据库或环境变量中已有完整 Authentik 配置或已启用本地账号登录，否则浏览器登录不可用。
+
+### 本地账号登录（无需 Authentik）
+
+`AUTH=true` 时也可以不部署任何外部身份认证服务：安装向导的认证步骤勾选「不使用 Authentik，改用服务器本地账号密码登录」即可创建首位管理员，密码以 scrypt（随机盐、PHC 格式）哈希存入 PostgreSQL。未配置任何 `AUTHENTIK_*` 变量时本地登录默认启用；已配置 Authentik 时设置 `LOCAL_LOGIN=true` 可同时提供两种登录方式，登录页会互相切换。
+
+```dotenv
+LOCAL_LOGIN=true
+# 可选：每次启动幂等创建/更新该管理员（修改密码后重启即生效）
+LOCAL_ADMIN_USERNAME=admin
+LOCAL_ADMIN_PASSWORD=replace-with-strong-password
+```
+
+- 本地账号仅用于管理后台 Web 会话（12 小时，CSRF 绑定）；MCP 接口仍使用 Bearer API Key；
+- 连续 5 次密码错误会锁定账号，锁定时长按 5→10→20→40→60 分钟递增，锁定期间即使密码正确也无法登录；
+- 登录接口 `/auth/local` 与 `/auth/*` 限流（默认每分钟 20 次/ IP）共享额度；登录失败不区分「用户名不存在」与「密码错误」；
+- 系统管理员可经 `/api/admin/local-users` 增删账号与重置密码；登录后 `POST /api/me/password` 可自助修改密码（需提供当前密码）。
 
 首次启动的中文 Web 安装向导包含四个步骤：
 
 1. 页面自动检查 PostgreSQL、pgvector 与迁移；
-2. `AUTH=true` 时配置并测试 Authentik Issuer、Audience、JWKS 和首位管理员邮箱；`AUTH=false` 时自动跳过；
+2. `AUTH=true` 时配置并测试 Authentik Issuer、Audience、JWKS 和首位管理员邮箱，或勾选「不使用 Authentik」改为创建本地管理员账号；`AUTH=false` 时自动跳过；
 3. 可选配置并测试 OpenAI-compatible 或 Ollama；
 4. 确认配置加密密钥已备份，完成安装并锁定向导。
 

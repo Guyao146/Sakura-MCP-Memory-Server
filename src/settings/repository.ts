@@ -1,6 +1,9 @@
 import type { AppConfig } from '../config.js';
 import type { Database } from '../database.js';
 import { ConfigCipher } from './crypto.js';
+import { hashPassword } from '../security/password.js';
+import type { LocalAdminInput } from '../setup/service.js';
+import { MemoryRepository } from '../memory/repository.js';
 import { APP_VERSION } from '../version.js';
 
 export interface InstallationState {
@@ -66,6 +69,7 @@ export class SettingsRepository {
   async complete(input: {
     administratorEmail?: string;
     authentik?: NonNullable<AppConfig['authentik']>;
+    localAdmin?: LocalAdminInput;
     openaiCompatible?: AppConfig['openaiCompatible'];
     ollama?: AppConfig['ollama'];
     embedding?: AppConfig['embedding'];
@@ -93,5 +97,20 @@ export class SettingsRepository {
       await client.query('COMMIT');
     } catch (error) { await client.query('ROLLBACK'); throw error; }
     finally { client.release(); }
+    // The local admin account is provisioned after the installation row is
+    // committed: it must not be possible to end up "installed" without the
+    // account that the administrator was told had been created.
+    if (input.localAdmin) await this.provisionLocalAdmin(input.localAdmin);
+  }
+
+  private async provisionLocalAdmin(admin: LocalAdminInput): Promise<void> {
+    const identity = await new MemoryRepository(this.database).ensureUser(`local:${admin.username.toLowerCase()}`, {
+      displayName: admin.displayName || admin.username, email: admin.email, adminByGroup: true
+    });
+    const passwordHash = await hashPassword(admin.password);
+    await this.database.query(
+      `INSERT INTO local_credentials(user_id,username,password_hash) VALUES($1,$2,$3)
+       ON CONFLICT (username) DO UPDATE SET user_id=EXCLUDED.user_id,password_hash=EXCLUDED.password_hash,updated_at=now()`,
+      [identity.userId, admin.username, passwordHash]);
   }
 }

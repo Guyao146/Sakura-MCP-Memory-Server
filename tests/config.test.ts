@@ -44,6 +44,19 @@ describe('loadConfig', () => {
     expect(config.database.host).toBe('postgres');
   });
 
+  it('defaults local login on without an OIDC provider and honours LOCAL_LOGIN', () => {
+    expect(loadConfig(base).localLogin).toEqual({ enabled: true, adminUsername: undefined, adminPassword: undefined });
+    const authentik = { AUTHENTIK_ISSUER: 'https://login.example.com/app', AUTHENTIK_AUDIENCE: 'mcp', AUTHENTIK_JWKS_URI: 'https://login.example.com/jwks/' };
+    // An Authentik installation keeps local accounts off unless asked for.
+    expect(loadConfig({ ...base, ...authentik }).localLogin.enabled).toBe(false);
+    expect(loadConfig({ ...base, ...authentik, LOCAL_LOGIN: 'true' }).localLogin.enabled).toBe(true);
+    expect(loadConfig({ ...base, LOCAL_LOGIN: 'false' }).localLogin.enabled).toBe(false);
+    // Declaring an admin through the environment implies local login.
+    expect(loadConfig({ ...base, ...authentik, LOCAL_ADMIN_USERNAME: 'ops', LOCAL_ADMIN_PASSWORD: 'ops-secret-123' }).localLogin)
+      .toEqual({ enabled: true, adminUsername: 'ops', adminPassword: 'ops-secret-123' });
+    expect(loadConfig({ ...base, auth: 'false' }).localLogin.enabled).toBe(false);
+  });
+
   it('does not require a setup token for first-run configuration', () => {
     expect(() => loadConfig({ ...base })).not.toThrow();
     expect(loadConfig({ ...base }).setup).toEqual({ encryptionKey: base.CONFIG_ENCRYPTION_KEY });

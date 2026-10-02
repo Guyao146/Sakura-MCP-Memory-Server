@@ -48,6 +48,16 @@ describe('memory database schema', () => {
     expect(sql).toContain('token_hash text UNIQUE NOT NULL');
   });
 
+  it('stores local login credentials hashed with lockout tracking', async () => {
+    const sql = await readFile(new URL('../migrations/013_local_login.sql', import.meta.url), 'utf8');
+    expect(sql).toContain('CREATE TABLE local_credentials');
+    expect(sql).toContain('password_hash text NOT NULL');
+    expect(sql).toContain('failed_attempts int NOT NULL DEFAULT 0');
+    expect(sql).toContain('locked_until timestamptz NOT NULL DEFAULT now()');
+    expect(sql).toContain("CHECK (auth_source IN ('authentik', 'local'))");
+    expect(sql).toContain('ADD COLUMN auth_source text');
+  });
+
   it('allows failed semantic jobs without fake vectors', async () => {
     const sql = await readFile(new URL('../migrations/004_semantic_memory.sql', import.meta.url), 'utf8');
     expect(sql).toContain('ADD COLUMN provider_type provider_type');

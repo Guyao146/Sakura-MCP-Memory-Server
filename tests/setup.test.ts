@@ -64,6 +64,22 @@ describe('installation security', () => {
     await expect(new SetupService(false, 'https://mcp.example.com', {} as never, settings as never).complete({})).resolves.toBeUndefined();
   });
 
+  it('accepts a local admin account in place of Authentik', async () => {
+    let saved: unknown;
+    const settings = { complete: async (input: unknown) => { saved = input; } };
+    const service = new SetupService(true, 'https://mcp.example.com', {} as never, settings as never);
+    await service.complete({ localAdmin: { username: 'admin', password: 'very-secret-123' } });
+    expect(saved).toMatchObject({ localAdmin: { username: 'admin', password: 'very-secret-123' } });
+  });
+
+  it('keeps local admin credentials out of the stored Authentik settings', async () => {
+    let saved: unknown;
+    const settings = { complete: async (input: unknown) => { saved = input; } };
+    const service = new SetupService(false, 'https://mcp.example.com', {} as never, settings as never);
+    await service.complete({ localAdmin: { username: 'admin', password: 'very-secret-123' }, ollama: { baseUrl: 'http://ollama:11434' } });
+    expect(saved).toEqual({ openaiCompatible: undefined, ollama: { baseUrl: 'http://ollama:11434' } });
+  });
+
   it('removes Authentik fields before completing no-auth setup', async () => {
     let saved: unknown;
     const settings = { complete: async (input: unknown) => { saved = input; } };

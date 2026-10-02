@@ -11,9 +11,19 @@ export const authentikConfigSchema = z.object({
   adminGroups: z.array(z.string().min(1).max(200)).max(20).optional()
 });
 
+export const localAdminInputSchema = z.object({
+  username: z.string().min(3).max(60).regex(/^[A-Za-z0-9._-]+$/,
+    '用户名只能包含字母、数字、点、下划线和连字符，长度为 3 到 60 个字符。'),
+  password: z.string().min(8).max(200),
+  displayName: z.string().min(1).max(120).optional(),
+  email: z.email().optional()
+});
+export type LocalAdminInput = z.infer<typeof localAdminInputSchema>;
+
 export const setupInputSchema = z.object({
   administratorEmail: z.email().optional(),
   authentik: authentikConfigSchema.optional(),
+  localAdmin: localAdminInputSchema.optional(),
   openaiCompatible: z.object({ baseUrl: z.url(), apiKey: z.string().max(1000).optional(), chatModel: z.string().max(200).optional(), embeddingModel: z.string().max(200).optional() }).optional(),
   ollama: z.object({ baseUrl: z.url(), chatModel: z.string().max(200).optional(), embeddingModel: z.string().max(200).optional() }).optional(),
   embedding: z.object({ baseUrl: z.url(), apiKey: z.string().max(1000).optional(), model: z.string().max(200).optional() }).optional()
@@ -145,8 +155,8 @@ export class SetupService {
   }
 
   async complete(input: SetupInput) {
-    if (this.authEnabled && (!input.administratorEmail || !input.authentik)) {
-      throw new Error('Administrator email and Authentik configuration are required when AUTH=true.');
+    if (this.authEnabled && !input.authentik && !input.localAdmin) {
+      throw new Error('AUTH=true 时需要配置 Authentik，或创建一个本地管理员账号。');
     }
     if (this.authEnabled && input.authentik) await this.testAuthentik(input.authentik);
     await this.settings.complete(this.authEnabled ? input : {

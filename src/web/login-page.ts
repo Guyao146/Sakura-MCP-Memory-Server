@@ -82,6 +82,7 @@ h1{font-size:21px;margin:0 0 7px}
     <div id="who"><span class="who-label">检测到已登录的 Authentik 会话</span><span class="who-name" id="whoName"></span></div>
     <a id="startButton" class="btn" href="/auth/start">使用 Authentik 登录</a>
     <a id="switchButton" class="btn ghost" href="/auth/start" hidden>使用其他账号登录</a>
+    <a id="localLoginLink" class="btn ghost" href="/auth/local-login" hidden>使用账号密码登录</a>
     <div class="themes" role="group" aria-label="外观">
       <button type="button" data-theme-choice="light">日间</button>
       <button type="button" data-theme-choice="dark">夜间</button>
@@ -145,7 +146,138 @@ applyTheme(choice);
 fetch('/health',{headers:{Accept:'application/json'}}).then(function(r){return r.json()}).then(function(d){
   if(d&&d.version)$('version').textContent='v'+d.version
 }).catch(function(){});
+fetch('/auth/modes').then(function(r){return r.json()}).then(function(d){
+  if(d&&d.local){var link=$('localLoginLink');link.hidden=false;link.href='/auth/local-login'+query}
+}).catch(function(){});
 $('startButton').focus();
 </script>
 </body></html>`;
 
+/**
+ * Username + password login page, served at `/auth/local-login` (and at
+ * `/auth/login` when no external OIDC provider is configured at all).
+ *
+ * Same security rules as the OIDC landing page: no server data is templated in,
+ * everything user-controlled is written with textContent, and the form posts via
+ * fetch so a failed attempt never loses the page. `/auth/local` answers with
+ * the redirect target only after the session cookie has been set.
+ */
+export const localLoginPage = `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录 · Sakura-MCP-Server</title>
+<meta name="theme-color" content="#12161f">
+<script>try{var t=localStorage.getItem('sakura-theme')||'auto';var d=t==='dark'||(t==='auto'&&matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.dataset.theme=d?'dark':'light'}catch(e){document.documentElement.dataset.theme='dark'}</script>
+<style>
+:root{--bg:#f2f0f1;--ink:#1f181b;--muted:#7d7378;--line:#ded7da;--card:#fff;--accent:#d2647f;--accent-soft:#fbe6ec;--panel-a:#2a1d24;--panel-b:#12161f}
+[data-theme=dark]{--bg:#0f1116;--ink:#eceaf0;--muted:#8d8792;--line:#2a2730;--card:#171a21;--accent:#e58aa3;--accent-soft:#2c1f26;--panel-a:#2b1e26;--panel-b:#0c0e14;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;grid-template-columns:1.05fr .95fr;background:var(--bg);color:var(--ink);font:14px/1.6 system-ui,'Microsoft YaHei',sans-serif;letter-spacing:.01em}
+.panel{position:relative;overflow:hidden;padding:clamp(32px,5vw,64px);display:flex;flex-direction:column;justify-content:space-between;background:linear-gradient(150deg,var(--panel-a),var(--panel-b));color:#f4eef1}
+.panel:before,.panel:after{content:'';position:absolute;border-radius:50%;pointer-events:none}
+.panel:before{width:420px;height:420px;right:-150px;top:-130px;background:radial-gradient(circle,rgba(229,138,163,.30),transparent 68%)}
+.panel:after{width:320px;height:320px;left:-120px;bottom:-110px;background:radial-gradient(circle,rgba(229,138,163,.16),transparent 70%)}
+.brand{display:flex;gap:11px;align-items:center;font-weight:700;font-size:17px;position:relative}
+.logo{width:28px;height:28px;border-radius:9px;background:var(--accent);position:relative;flex:none}
+.logo:after{content:'';position:absolute;width:10px;height:10px;border:2px solid #fff;border-radius:50%;top:7px;left:7px}
+.copy{position:relative;margin:40px 0}
+.headline{font-size:clamp(24px,2.7vw,33px);line-height:1.42;font-weight:700;margin:0 0 26px}
+.points{list-style:none;margin:0;padding:0;display:grid;gap:13px;color:rgba(244,238,241,.78)}
+.points li{display:flex;gap:11px;align-items:flex-start}
+.pt{color:var(--accent);font-size:15px;line-height:1.5}
+.panel-foot{position:relative;display:flex;gap:11px;align-items:center;flex-wrap:wrap;font-size:12px;color:rgba(244,238,241,.6)}
+.mono{font:500 11px ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.08em;border:1px solid rgba(244,238,241,.22);border-radius:999px;padding:4px 10px}
+.side{display:flex;align-items:center;justify-content:center;padding:28px}
+main{width:100%;max-width:380px}
+.logo{margin-bottom:22px}
+h1{font-size:26px;margin:0 0 8px}
+.sub{color:var(--muted);margin:0 0 20px;font-size:13px}
+#notice{display:none;color:var(--accent);background:var(--accent-soft);border-radius:9px;padding:10px 13px;margin-bottom:16px;font-size:13px}
+.btn{display:block;text-align:center;text-decoration:none;margin-top:16px;padding:12px;border-radius:10px;font-weight:650;background:var(--accent);color:var(--card)}
+form{display:grid}
+label{margin:12px 0 5px;font-size:13px;color:var(--muted)}
+input{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:9px;background:var(--card);color:var(--ink);font:inherit}
+input:focus{outline:2px solid var(--accent);border-color:var(--accent)}
+button{margin-top:18px;padding:12px;border:0;border-radius:10px;font-weight:650;cursor:pointer;background:var(--accent);color:#fff}
+button:disabled{opacity:.5;cursor:not-allowed}
+.themes{display:flex;gap:6px;margin-top:22px}
+.themes button{flex:1;padding:8px;background:transparent;border:1px solid var(--line);color:var(--muted);font-size:12px;border-radius:999px}
+.themes button.on{border-color:var(--accent);color:var(--accent)}
+.foot{margin-top:26px;font-size:12px;color:var(--muted);line-height:1.7}
+.foot a{color:var(--accent)}
+.version{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+@media(max-width:820px){body{grid-template-columns:1fr}.panel{display:none}.side{padding:20px}}
+</style></head>
+<body>
+<section class="panel">
+  <div class="brand"><span class="logo" aria-hidden="true"></span>Sakura-MCP-Server</div>
+  <div class="copy"><h2 class="headline">服务器本地账号登录</h2><ul class="points">
+    <li><span class="pt">◆</span>账号密码保存在本服务器，无需外部身份认证服务</li>
+    <li><span class="pt">◆</span>连续失败多次会临时锁定，防止暴力破解</li>
+    <li><span class="pt">◆</span>仅用于管理后台会话，MCP 接口仍使用 API Key</li>
+  </ul></div>
+  <div class="panel-foot"><span class="mono">LOCAL LOGIN</span><span>记忆空间 · Agent · Provider 管理</span></div>
+</section>
+<div class="side">
+  <main>
+    <div class="logo" aria-hidden="true"></div>
+    <h1 id="title">欢迎回来</h1>
+    <p class="sub" id="subtitle">请输入服务器本地账号的用户名和密码。</p>
+    <div id="notice" role="status"></div>
+    <form id="localForm" autocomplete="on">
+      <label for="username">用户名</label>
+      <input id="username" name="username" autocomplete="username" autocapitalize="none" required>
+      <label for="password">密码</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button id="submitButton" type="submit">登录</button>
+    </form>
+    <div class="themes" role="group" aria-label="外观">
+      <button type="button" data-theme-choice="light">日间</button>
+      <button type="button" data-theme-choice="dark">夜间</button>
+<script>
+var $=function(id){return document.getElementById(id)};
+var params=new URLSearchParams(location.search);
+var target=params.get('return_to')||'/admin';
+var safeTarget=/^\\/(?!\\/)/.test(target)?target:'/admin';
+var query='?return_to='+encodeURIComponent(safeTarget);
+var notices={expired:'登录状态已过期，请重新登录。',logged_out:'已退出登录。'};
+var notice=notices[params.get('reason')];
+if(notice){$('notice').textContent=notice;$('notice').style.display='block'}
+$('localForm').addEventListener('submit',function(event){
+  event.preventDefault();
+  var button=$('submitButton');button.disabled=true;
+  var body={username:$('username').value.trim(),password:$('password').value,return_to:safeTarget};
+  fetch('/auth/local',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){
+    return r.json().then(function(d){return {ok:r.ok,data:d}})
+  }).then(function(out){
+    if(out.ok){location.href=out.data.redirectTo||'/admin';return}
+    $('notice').textContent=out.data&&out.data.error_description||'登录失败，请检查用户名和密码。';
+    $('notice').style.display='block';
+    $('password').value='';
+    $('password').focus();
+  }).catch(function(){
+    $('notice').textContent='网络错误，请稍后重试。';$('notice').style.display='block'
+  }).finally(function(){button.disabled=false});
+});
+var choice='auto';
+try{choice=localStorage.getItem('sakura-theme')||'auto'}catch(e){}
+function applyTheme(next){
+  choice=next;
+  try{localStorage.setItem('sakura-theme',next)}catch(e){}
+  var dark=next==='dark'||(next==='auto'&&matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.dataset.theme=dark?'dark':'light';
+  var all=document.querySelectorAll('[data-theme-choice]');
+  for(var i=0;i<all.length;i++)all[i].classList.toggle('on',all[i].dataset.themeChoice===next);
+}
+var buttons=document.querySelectorAll('[data-theme-choice]');
+for(var i=0;i<buttons.length;i++)buttons[i].addEventListener('click',function(){applyTheme(this.dataset.themeChoice)});
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',function(){if(choice==='auto')applyTheme('auto')});
+applyTheme(choice);
+fetch('/health',{headers:{Accept:'application/json'}}).then(function(r){return r.json()}).then(function(d){
+  if(d&&d.version)$('version').textContent='v'+d.version
+}).catch(function(){});
+fetch('/auth/modes').then(function(r){return r.json()}).then(function(d){
+  if(d&&d.oidc){var here=$('localForm');var a=document.createElement('a');a.className='btn';a.href='/auth/login'+query;a.textContent='使用 Authentik 登录';here.parentNode.insertBefore(a,here.nextSibling)}
+}).catch(function(){});
+$('username').focus();
+</script>
+</body></html>`;
