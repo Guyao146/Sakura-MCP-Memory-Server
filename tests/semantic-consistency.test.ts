@@ -56,6 +56,27 @@ describe('semantic consistency', () => {
     expect(sql).not.toContain('LIMIT 1000');
   });
 
+  it('ranks semantic conflicts in SQL instead of shipping vectors to Node', async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('SELECT sm.role')) return { rows: [{ role: 'owner' }] };
+      if (sql.includes('regexp_replace')) return { rows: [] };                        // exact-duplicate probe
+      if (sql.includes('embedding::text,dimensions,model')) return { rows: [{ embedding: '[1,0]', dimensions: 2, model: 'demo' }] };
+      if (sql.includes('memory_conflicts')) return { rows: [{ id: 'conflict' }] };    // conflict insert
+      if (sql.includes('<=>')) return { rows: [{ id: 'other', distance: 0.1 }] };     // similarity candidates
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const governance = new MemoryGovernanceService({ query } as never);
+    vi.spyOn(MemoryRepository.prototype, 'get').mockResolvedValue(memory as never);
+    const result = await governance.detect('user', 'memory');
+    const candidateSql = query.mock.calls.find(([sql]) => sql.includes('<=>'))![0] as string;
+    expect(candidateSql).toContain('me.embedding <=> $4::vector <= $6');
+    expect(candidateSql).toContain('me.model=$5');
+    expect(candidateSql).toContain('LIMIT 20');
+    // No bulk vector pull into Node anymore.
+    expect(query.mock.calls.some(([sql]) => String(sql).includes('me.embedding::text'))).toBe(false);
+    expect(result.conflicts).toEqual([{ id: 'conflict', memoryId: 'other', similarity: expect.closeTo(0.9, 5) }]);
+  });
+
   it('keeps contributor writes successful while reporting skipped governance', async () => {
     const db = { query: vi.fn(async () => ({ rows: [{ role: 'contributor' }] })) };
     const service = new SemanticMemoryService(db as never, () => config);

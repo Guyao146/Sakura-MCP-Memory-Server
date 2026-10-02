@@ -1,5 +1,4 @@
 import { serve } from '@hono/node-server';
-import { createMcpHonoApp } from '@modelcontextprotocol/hono';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
 import type { Context, Next } from 'hono';
 import pino from 'pino';
@@ -28,9 +27,10 @@ import { WebSessionService } from './web/session.js';
 import type { WebIdentity } from './web/session.js';
 import { adminPage } from './web/admin-page.js';
 import { loginPage } from './web/login-page.js';
-import { RateLimiter, securityHeaders, attachmentHeader } from './security/http.js';
+import { attachmentHeader } from './security/http.js';
+import { createHttpApp } from './security/app.js';
 import { APP_VERSION, UpdateChecker } from './version.js';
-import { isRootMcpRequest, streamWithDeferredCleanup } from './mcp-routing.js';
+import { isRootMcpRequest, readMcpBody, streamWithDeferredCleanup } from './mcp-routing.js';
 import { RequestLifecycle, createShutdown } from './lifecycle.js';
 import { operationContext, operationSignal, trackOperation } from './operations.js';
 
@@ -59,15 +59,7 @@ const jobs = new JobRepository(database);
 const worker = new BackgroundWorker(database, semantic, baseConfig.worker.pollIntervalMs,
   baseConfig.worker.staleAfterSeconds, logger);
 if (baseConfig.worker.enabled) worker.start();
-const app = createMcpHonoApp({ host: baseConfig.host, allowedHosts: [new URL(baseConfig.publicBaseUrl).hostname] });
-const limiter = new RateLimiter();
-
-app.use('*', securityHeaders());
-app.use('/mcp', limiter.middleware('mcp', baseConfig.security.mcpPerMinute, baseConfig.security.trustProxy));
-app.use('/', limiter.middleware('mcp-root', baseConfig.security.mcpPerMinute, baseConfig.security.trustProxy));
-app.use('/auth/*', limiter.middleware('auth', baseConfig.security.authPerMinute, baseConfig.security.trustProxy));
-app.use('/api/setup/*', limiter.middleware('setup', baseConfig.security.setupPerMinute, baseConfig.security.trustProxy));
-app.use('/api/admin/*', limiter.middleware('web', baseConfig.security.webPerMinute, baseConfig.security.trustProxy));
+const app = createHttpApp(baseConfig);
 app.use('/api/admin/*', async (context, next) => {
   if (!(await settings.installation()).completed) {
     return context.json({ error: 'setup_required', error_description: 'Complete installation at /setup first.' }, 503);
@@ -323,6 +315,7 @@ app.get('/api/admin/exports', async context => {
       action: 'web.GET./api/admin/exports', targetType: 'space_export', targetId: query.space_id, result: 'success', metadata: { format: query.format } });
     context.header('Content-Type', `${exported.mimeType}; charset=utf-8`);
     context.header('Content-Disposition', attachmentHeader(exported.filename));
+    if (exported.truncated) context.header('X-Export-Truncated', String(exported.rowCount));
     return context.body(exported.content);
   } catch (error) {
     await audit.record({ actorUserId: identity?.userId, authSource: identity ? webAuthSource() : undefined,
@@ -416,20 +409,32 @@ app.get('/api/admin/audit', async context => adminApi(context, false, async iden
     limit: query.limit, cursor: query.cursor, systemAdmin: identity.isSystemAdmin });
 }));
 
+// Health probes hit a public endpoint every few seconds; cache the database
+// round trips briefly so a busy checker cannot turn into a constant full scan
+// of the ever-growing job table.
+let healthCache: { at: number; pgvector: string; installed: boolean; pending: number; processing: number; failed: number } | undefined;
+const HEALTH_CACHE_MS = 5_000;
+
 app.get('/health', async context => {
   try {
-    const [vector, installation, queue] = await Promise.all([
-      database.query<{ version: string }>("SELECT extversion AS version FROM pg_extension WHERE extname='vector'"),
-      settings.installation(),
-      database.query<{ pending: string; processing: string; failed: string }>(
-        `SELECT count(*) FILTER(WHERE status='pending')::text AS pending,
-         count(*) FILTER(WHERE status='processing')::text AS processing,
-         count(*) FILTER(WHERE status='failed')::text AS failed FROM ingestion_jobs`)
-    ]);
+    const now = Date.now();
+    let cached = healthCache && now - healthCache.at < HEALTH_CACHE_MS ? healthCache : undefined;
+    if (!cached) {
+      const [vector, installation, queue] = await Promise.all([
+        database.query<{ version: string }>("SELECT extversion AS version FROM pg_extension WHERE extname='vector'"),
+        settings.installation(),
+        database.query<{ pending: string; processing: string; failed: string }>(
+          `SELECT count(*) FILTER(WHERE status='pending')::text AS pending,
+           count(*) FILTER(WHERE status='processing')::text AS processing,
+           count(*) FILTER(WHERE status='failed')::text AS failed FROM ingestion_jobs`)
+      ]);
+      cached = healthCache = { at: now, pgvector: vector.rows[0]?.version ?? 'missing', installed: installation.completed,
+        pending: Number(queue.rows[0].pending), processing: Number(queue.rows[0].processing), failed: Number(queue.rows[0].failed) };
+    }
     return context.json({ status: 'ok', service: 'Sakura-MCP-Server', version: APP_VERSION,
-      database: 'ok', pgvector: vector.rows[0]?.version ?? 'missing', installed: installation.completed, authEnabled: config.authEnabled,
-      worker: { enabled: baseConfig.worker.enabled, pending: Number(queue.rows[0].pending),
-        processing: Number(queue.rows[0].processing), failed: Number(queue.rows[0].failed) } });
+      database: 'ok', pgvector: cached.pgvector, installed: cached.installed, authEnabled: config.authEnabled,
+      worker: { enabled: baseConfig.worker.enabled, pending: cached.pending,
+        processing: cached.processing, failed: cached.failed } });
   } catch {
     return context.json({ status: 'degraded', service: 'Sakura-MCP-Server', version: APP_VERSION,
       database: 'unavailable', authEnabled: config.authEnabled }, 503);
@@ -455,12 +460,15 @@ async function handleMcp(context: Context): Promise<Response> {
     return context.json({ error: 'unauthorized', error_description: message }, 401,
       { 'WWW-Authenticate': `Bearer resource_metadata="${config.publicBaseUrl}${metadataPath}"` });
   }
+  const parsedBody = await readMcpBody(context);
+  if (parsedBody instanceof Response) return parsedBody;
+  const identity = trackOperation(() => memories.ensureUser(principal.id, { email: principal.email, displayName: principal.displayName }));
   // Session tracking is best-effort telemetry: never let it fail a real request.
-  const tracker = await beginClientTracking(context, principal).catch(error => {
+  const tracker = await identity.then(({ userId }) => beginClientTracking(context, principal, userId, parsedBody)).catch(error => {
     logger.warn({ err: error }, 'Client session tracking failed');
     return undefined;
   });
-  const server = createServer(database, principal, audit, () => config);
+  const server = createServer(database, principal, audit, () => config, identity);
   // Stateless transport prevents one authenticated client's session from being reused by another principal.
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   let failed = false;
@@ -475,7 +483,7 @@ async function handleMcp(context: Context): Promise<Response> {
   try {
     operationSignal()?.throwIfAborted();
     await server.connect(transport);
-    response = await transport.handleRequest(context.req.raw, { parsedBody: context.get('parsedBody' as never) as unknown });
+    response = await transport.handleRequest(context.req.raw, { parsedBody });
   } catch (error) {
     failed = !operationSignal()?.aborted;
     if (failed) logger.error({ err: error, principal: principal.id }, 'MCP transport request failed');
@@ -490,9 +498,8 @@ async function handleMcp(context: Context): Promise<Response> {
  * be finished when the response stream closes, which is how an in-flight tool
  * call stops being reported as "uploading".
  */
-async function beginClientTracking(context: Context, principal: Principal) {
-  const facts = readMcpFacts(context.get('parsedBody' as never) as unknown);
-  const { userId } = await memories.ensureUser(principal.id, { email: principal.email, displayName: principal.displayName });
+async function beginClientTracking(context: Context, principal: Principal, userId: string, parsedBody: unknown) {
+  const facts = readMcpFacts(parsedBody);
   const identity: ClientIdentity = {
     userId,
     agentId: principal.agentId,

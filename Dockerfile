@@ -16,7 +16,7 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/migrations ./migrations
 COPY scripts/container-entrypoint.sh ./container-entrypoint.sh
 COPY scripts/healthcheck.mjs ./healthcheck.mjs
-RUN chmod 0555 /app/container-entrypoint.sh && groupadd --system --gid 10001 mcp && useradd --system --uid 10001 --gid mcp --home-dir /app --no-create-home mcp && mkdir -p /app/data && chown -R mcp:mcp /app
+RUN chmod 0555 /app/container-entrypoint.sh && groupadd --system --gid 10001 mcp && useradd --system --uid 10001 --gid mcp --home-dir /app --no-create-home mcp && install -d -o mcp -g mcp -m 0700 /app/data
 USER mcp
 EXPOSE 3000
 STOPSIGNAL SIGTERM

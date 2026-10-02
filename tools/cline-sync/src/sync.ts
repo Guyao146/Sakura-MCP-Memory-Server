@@ -1,4 +1,4 @@
-import { listTasks, readMessages } from './cline-store.js';
+import { listTasks, readMessages, historyFingerprint, type ClineTask } from './cline-store.js';
 import { syncChunks } from './chunks.js';
 import { McpClient } from './mcp-client.js';
 import type { SyncConfig } from './config.js';
@@ -65,8 +65,18 @@ export async function runSync(config: SyncConfig, options: {
       outcomes.push({ taskId: task.taskId, status: 'skipped', newMessages: 0, reason: filtered });
       continue;
     }
+    const cursor = cursors[task.taskId];
+    if (unchangedHistory(task, cursor)) {
+      outcomes.push({ taskId: task.taskId, status: 'skipped', newMessages: 0, reason: '无新增内容' });
+      continue;
+    }
     let messages;
-    try { messages = await readMessages(task.path, signal); }
+    let stable = false;
+    try {
+      messages = await readMessages(task.path, signal);
+      // Never certify a snapshot if Cline rewrote the file while we read it.
+      stable = await historyFingerprint(task.path) === task.fingerprint;
+    }
     catch (error) {
       if (signal?.aborted) break;
       outcomes.push({ taskId: task.taskId, status: 'failed', newMessages: 0, reason: message(error) });
@@ -78,11 +88,11 @@ export async function runSync(config: SyncConfig, options: {
     const from = already > messages.length ? 0 : already;
     const pending = messages.slice(from);
     if (pending.length < MIN_NEW_MESSAGES) {
+      if (cursor && stable && !cursor.messageOffset) cursor.history = { fingerprint: task.fingerprint, messageCount: messages.length };
       outcomes.push({ taskId: task.taskId, status: 'skipped', newMessages: pending.length, reason: '无新增内容' });
       continue;
     }
 
-    const cursor = cursors[task.taskId];
     let failed = false;
     let uploaded = false;
     for (const chunk of syncChunks(messages, from, from === already ? cursor?.messageOffset : 0,
@@ -103,7 +113,9 @@ export async function runSync(config: SyncConfig, options: {
         uploaded = true;
       }
       cursors[task.taskId] = { messageCount: chunk.messageCount, messageOffset: chunk.messageOffset,
-        messageHash: chunk.messageHash, syncedAt: new Date(now()).toISOString() };
+        messageHash: chunk.messageHash, syncedAt: new Date(now()).toISOString(),
+        ...(stable && chunk.messageCount === messages.length && !chunk.messageOffset
+          ? { history: { fingerprint: task.fingerprint, messageCount: messages.length } } : {}) };
       // Persist each confirmed chunk, not only at the end of a possibly long scan.
       if (persist) await (options.saveCursorsImpl ?? saveCursors)(cursors);
     }
@@ -150,8 +162,9 @@ export async function listTaskInventory(config: SyncConfig, options: {
   const items: TaskInventoryItem[] = [];
   for (const task of tasks) {
     options.signal?.throwIfAborted();
+    const cursor = cursors[task.taskId];
     let messageCount = 0;
-    try { messageCount = (await readMessages(task.path, options.signal)).length; }
+    try { messageCount = unchangedHistory(task, cursor) ? cursor!.messageCount : (await readMessages(task.path, options.signal)).length; }
     catch { options.signal?.throwIfAborted(); messageCount = 0; }
     const already = cursors[task.taskId]?.messageCount ?? 0;
     const from = already > messageCount ? 0 : already;
@@ -169,6 +182,11 @@ export async function listTaskInventory(config: SyncConfig, options: {
   }
   // Most recent first: that is what the operator usually wants to act on.
   return items.reverse();
+}
+
+function unchangedHistory(task: ClineTask, cursor: Cursors[string] | undefined): boolean {
+  return !!cursor?.history && !cursor.messageOffset && cursor.history.fingerprint === task.fingerprint
+    && cursor.history.messageCount === cursor.messageCount;
 }
 
 function message(error: unknown): string {

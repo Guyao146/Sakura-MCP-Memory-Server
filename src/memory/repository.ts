@@ -6,14 +6,28 @@ export class MemoryRepository {
   constructor(private readonly database: Database) {}
 
   async ensureUser(subject: string, profile?: { email?: string; displayName?: string; adminByGroup?: boolean }): Promise<{ userId: string; personalSpaceId: string }> {
+    // A live DB lookup, not an authorization cache. Skip provisioning writes only
+    // while profile, administrator state, personal space and membership are current.
+    const existing = await this.database.query<{ userId: string; personalSpaceId: string }>(
+      `SELECT u.id AS "userId",s.id AS "personalSpaceId" FROM users u
+       JOIN spaces s ON s.created_by=u.id AND s.type='personal' AND s.deleted_at IS NULL
+       JOIN space_members sm ON sm.space_id=s.id AND sm.user_id=u.id AND sm.role='owner'
+       WHERE u.oidc_subject=$1 AND ($2::text IS NULL OR u.email IS NOT DISTINCT FROM $2)
+       AND ($3::text IS NULL OR u.display_name IS NOT DISTINCT FROM $3)
+       AND u.last_login_at > now()-interval '5 minutes'
+       AND CASE WHEN $4::boolean IS NULL THEN
+         u.is_system_admin OR NOT EXISTS (SELECT 1 FROM system_admin_allowlist WHERE lower(email)=lower($2))
+       ELSE u.is_system_admin = ($4 OR EXISTS (SELECT 1 FROM system_admin_allowlist WHERE lower(email)=lower($2))) END`,
+      [subject, profile?.email ?? null, profile?.displayName ?? null, profile?.adminByGroup ?? null]);
+    if (existing.rows[0]) return existing.rows[0];
     const client = await this.database.pool.connect();
     try {
       await client.query('BEGIN');
       const result = await client.query<{ id: string }>(
-        `INSERT INTO users(oidc_subject, email, display_name, last_login_at) VALUES ($1, $2, $3, now())
+        `INSERT INTO users(oidc_subject, email, display_name, last_login_at) VALUES ($1, $2, coalesce($3,$1), now())
          ON CONFLICT (oidc_subject) DO UPDATE SET email=coalesce(EXCLUDED.email,users.email),
-         display_name=coalesce(EXCLUDED.display_name,users.display_name),last_login_at=now(),updated_at=now()
-         RETURNING id`, [subject, profile?.email ?? null, profile?.displayName ?? subject]);
+         display_name=coalesce($3,users.display_name),last_login_at=now(),updated_at=now()
+         RETURNING id`, [subject, profile?.email ?? null, profile?.displayName ?? null]);
       const userId = result.rows[0].id;
       const allowlisted = profile?.email
         ? (await client.query('SELECT 1 FROM system_admin_allowlist WHERE lower(email)=lower($1)', [profile.email])).rowCount === 1
@@ -64,7 +78,8 @@ export class MemoryRepository {
       `SELECT m.* FROM memories m JOIN space_members sm ON sm.space_id=m.space_id
        WHERE m.id=$1 AND sm.user_id=$2 AND m.deleted_at IS NULL`, [memoryId, userId]);
     if (!result.rows[0]) throw new Error('Memory not found or access denied.');
-    await this.database.query('UPDATE memories SET last_accessed_at=now() WHERE id=$1', [memoryId]);
+    await this.database.query(`UPDATE memories SET last_accessed_at=now() WHERE id=$1
+      AND (last_accessed_at IS NULL OR last_accessed_at < now()-interval '5 minutes')`, [memoryId]);
     return result.rows[0];
   }
 

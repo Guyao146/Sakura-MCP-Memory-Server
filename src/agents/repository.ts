@@ -38,13 +38,13 @@ export class AgentRepository {
     return { id: row.id, name: row.name, token: this.cipher.decrypt<string>(row.secret_encrypted as Parameters<ConfigCipher['decrypt']>[0]) };
   }
 
-  async list(ownerId: string) {
+  async list(ownerId: string, limit = 200) {
     const result = await this.database.query(
       `SELECT ac.id,ac.name,ac.key_prefix,ac.scopes,ac.expires_at,ac.revoked_at,ac.last_used_at,ac.created_at,
        ac.secret_encrypted IS NOT NULL AS revealable,
        coalesce(json_agg(json_build_object('space_id',asg.space_id,'scopes',asg.scopes)) FILTER (WHERE asg.space_id IS NOT NULL),'[]') AS space_grants
        FROM agent_credentials ac LEFT JOIN agent_space_grants asg ON asg.agent_id=ac.id
-       WHERE ac.owner_id=$1 GROUP BY ac.id ORDER BY ac.created_at DESC`, [ownerId]);
+       WHERE ac.owner_id=$1 GROUP BY ac.id ORDER BY ac.created_at DESC LIMIT $2`, [ownerId, limit]);
     return result.rows;
   }
 

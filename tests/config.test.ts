@@ -14,6 +14,14 @@ describe('loadConfig', () => {
     expect(config.publicBaseUrl).toBe('https://mcp.example.com');
     expect(config.apiKeys[0]).toMatchObject({ id: 'agent', scopes: ['memory:read', 'memory:write'] });
   });
+  it('uses a safe configurable raw request byte limit', () => {
+    expect(loadConfig(base).security.maxBodyBytes).toBe(6 * 1024 * 1024);
+    expect(loadConfig({ ...base, MAX_REQUEST_BODY_BYTES: '2097152' }).security.maxBodyBytes).toBe(2097152);
+    for (const value of ['0', '-1', '1.5', 'NaN', '67108865']) {
+      expect(() => loadConfig({ ...base, MAX_REQUEST_BODY_BYTES: value })).toThrow();
+    }
+  });
+
   it('rejects incomplete Authentik configuration', () => {
     expect(() => loadConfig({ ...base, AUTHENTIK_ISSUER: 'https://login.example.com/app' })).toThrow('must be configured together');
   });

@@ -1,12 +1,14 @@
 import { serve } from '@hono/node-server';
-import { createMcpHonoApp } from '@modelcontextprotocol/hono';
+import { createHttpApp } from '../src/security/app.js';
+import { loadConfig } from '../src/config.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { expect, it } from 'vitest';
 
 it('checks loopback health using the public Host without weakening validation', async () => {
-  const app = createMcpHonoApp({ host: '0.0.0.0', allowedHosts: ['mcp.example.com'] });
+  const app = createHttpApp(loadConfig({ HOST: '0.0.0.0', PUBLIC_BASE_URL: 'https://mcp.example.com',
+    DATABASE_URL: 'postgresql://unused', CONFIG_ENCRYPTION_KEY: Buffer.alloc(32).toString('base64url') }));
   app.get('/health', context => context.json({ ok: true }));
   const server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 0 });
   if (!server.listening) await new Promise<void>(resolve => server.once('listening', resolve));

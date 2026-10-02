@@ -18,26 +18,54 @@ export class MemoryTransferService {
   constructor(private readonly database: Database, private readonly semantic: SemanticMemoryService,
     private readonly governance: MemoryGovernanceService) {}
 
-  async export(userId: string, spaceId: string, format: 'json'|'markdown'): Promise<{ filename: string; mimeType: string; content: string }> {
+  /**
+   * Exports a space as portable JSON or Markdown. Rows are read in bounded,
+   * keyset-paginated batches and rendered incrementally so that a very large
+   * space can never assemble one giant result set (or one giant string) in
+   * memory: the export is hard-capped at `maxRows` rows and reports `truncated`.
+   */
+  async export(userId: string, spaceId: string, format: 'json'|'markdown', options?: { maxRows?: number; batchSize?: number }): Promise<{ filename: string; mimeType: string; content: string; rowCount: number; truncated: boolean }> {
+    const signal = operationSignal();
     await requireSpaceRole(this.database, userId, spaceId, 'viewer');
     const space = await this.database.query<{ name: string; description: string }>('SELECT name,description FROM spaces WHERE id=$1 AND deleted_at IS NULL', [spaceId]);
     if (!space.rows[0]) throw new Error('Memory space not found.');
-    const memories = await this.database.query(
-      `SELECT m.id,m.type,m.content,m.summary,m.tags,m.importance,m.confidence,m.sensitivity,m.status,
-       m.valid_from,m.valid_until,m.expires_at,m.created_at,m.updated_at,
-       coalesce(json_agg(json_build_object('type',ms.source_type,'uri',ms.source_uri,'agent',ms.source_agent,'excerpt',ms.excerpt,'metadata',ms.metadata))
-         FILTER(WHERE ms.id IS NOT NULL),'[]') AS sources
-       FROM memories m LEFT JOIN memory_sources ms ON ms.memory_id=m.id
-       WHERE m.space_id=$1 AND m.deleted_at IS NULL GROUP BY m.id ORDER BY m.created_at`, [spaceId]);
     const safeName = space.rows[0].name.replace(/[^\p{L}\p{N}._-]+/gu, '-').replace(/^-+|-+$/g, '') || 'memory-space';
-    if (format === 'json') return { filename: `${safeName}.json`, mimeType: 'application/json', content: JSON.stringify({
-      schema: 'sakura-memory-export/v1', exportedAt: new Date().toISOString(), space: space.rows[0], memories: memories.rows
-    }, null, 2) };
-    const sections = memories.rows.map((memory: Record<string, unknown>) => {
-      const tags = (memory.tags as string[]).join(', ');
-      return `## ${memory.summary || memory.type}\n\n- ID: ${memory.id}\n- Type: ${memory.type}\n- Tags: ${tags}\n- Importance: ${memory.importance}\n- Confidence: ${memory.confidence}\n\n${memory.content}`;
-    });
-    return { filename: `${safeName}.md`, mimeType: 'text/markdown', content: `# ${space.rows[0].name}\n\n${space.rows[0].description}\n\n${sections.join('\n\n---\n\n')}\n` };
+    const maxRows = options?.maxRows ?? 50_000;
+    const batchSize = options?.batchSize ?? 500;
+    const batches = exportBatches(this.database, spaceId, batchSize);
+    if (format === 'json') {
+      // Compact, streaming-friendly JSON built one row at a time.
+      const parts = [`{"schema":"sakura-memory-export/v1","exportedAt":${JSON.stringify(new Date().toISOString())},"space":${JSON.stringify(space.rows[0])},"memories":[`];
+      let first = true; let rowCount = 0; let truncated = false;
+      for await (const rows of batches) {
+        signal?.throwIfAborted();
+        for (const row of rows) {
+          if (rowCount >= maxRows) { truncated = true; break; }
+          parts.push((first ? '' : ',') + JSON.stringify(row));
+          first = false;
+          rowCount += 1;
+        }
+        if (truncated) break;
+      }
+      parts.push(']');
+      if (truncated) parts.push(`,"truncated":true,"maxRows":${maxRows}`);
+      parts.push('}');
+      return { filename: `${safeName}.json`, mimeType: 'application/json', content: parts.join(''), rowCount, truncated };
+    }
+    const sections: string[] = [];
+    let rowCount = 0; let truncated = false;
+    for await (const rows of batches) {
+      signal?.throwIfAborted();
+      for (const memory of rows as Array<Record<string, unknown>>) {
+        if (rowCount >= maxRows) { truncated = true; break; }
+        const tags = (memory.tags as string[]).join(', ');
+        sections.push(`## ${memory.summary || memory.type}\n\n- ID: ${memory.id}\n- Type: ${memory.type}\n- Tags: ${tags}\n- Importance: ${memory.importance}\n- Confidence: ${memory.confidence}\n\n${memory.content}`);
+        rowCount += 1;
+      }
+      if (truncated) break;
+    }
+    return { filename: `${safeName}.md`, mimeType: 'text/markdown',
+      content: `# ${space.rows[0].name}\n\n${space.rows[0].description}\n\n${sections.join('\n\n---\n\n')}\n`, rowCount, truncated };
   }
 
   async import(userId: string, spaceId: string, format: 'json'|'markdown', content: string, sourceAgent?: string) {
@@ -84,6 +112,34 @@ export class MemoryTransferService {
     if (!result.rows[0]) throw new Error('Import job not found or access denied.');
     await requireAgentSpaceScope(this.database, agentId, result.rows[0].space_id, 'memory:read');
     return result.rows[0];
+  }
+}
+
+/**
+ * Keyset-paginates the memories of a space so the export never materializes
+ * the whole space in one query. Ordering by (created_at, id) is stable because
+ * memory ids are unique.
+ */
+async function* exportBatches(database: Database, spaceId: string, batchSize: number): AsyncGenerator<Record<string, unknown>[]> {
+  let cursorCreatedAt: string | null = null;
+  let cursorId: string | null = null;
+  for (;;) {
+    const result = await database.query(
+      `SELECT m.id,m.type,m.content,m.summary,m.tags,m.importance,m.confidence,m.sensitivity,m.status,
+       m.valid_from,m.valid_until,m.expires_at,m.created_at,m.updated_at,
+       coalesce(json_agg(json_build_object('type',ms.source_type,'uri',ms.source_uri,'agent',ms.source_agent,'excerpt',ms.excerpt,'metadata',ms.metadata))
+         FILTER(WHERE ms.id IS NOT NULL),'[]') AS sources
+       FROM memories m LEFT JOIN memory_sources ms ON ms.memory_id=m.id
+       WHERE m.space_id=$1 AND m.deleted_at IS NULL
+       AND ($2::timestamptz IS NULL OR (m.created_at,m.id)>($2,$3::uuid))
+       GROUP BY m.id ORDER BY m.created_at,m.id LIMIT $4`,
+      [spaceId, cursorCreatedAt, cursorId, batchSize]);
+    if (!result.rows.length) return;
+    yield result.rows;
+    const last = result.rows[result.rows.length - 1] as { created_at: string; id: string };
+    cursorCreatedAt = last.created_at;
+    cursorId = last.id;
+    if (result.rows.length < batchSize) return;
   }
 }
 

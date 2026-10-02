@@ -23,7 +23,8 @@ const text = (value: unknown) => ({
 });
 const failure = (message: string) => ({ content: [{ type: 'text' as const, text: message }], isError: true });
 
-export function createServer(database: Database, principal: Principal, audit: AuditLogger, getConfig: () => AppConfig): McpServer {
+export function createServer(database: Database, principal: Principal, audit: AuditLogger, getConfig: () => AppConfig,
+  requestIdentity?: ReturnType<MemoryRepository['ensureUser']>): McpServer {
   const server = new McpServer({ name: 'Sakura-MCP-Server', version: APP_VERSION });
   const repository = new MemoryRepository(database);
   const semantic = new SemanticMemoryService(database, getConfig);
@@ -32,7 +33,7 @@ export function createServer(database: Database, principal: Principal, audit: Au
   const jobs = new JobRepository(database);
   const agents = new AgentRepository(database, getConfig().setup.encryptionKey);
   const spaces = new SpaceRepository(database);
-  const identity = trackOperation(() => repository.ensureUser(principal.id, { email: principal.email, displayName: principal.displayName }));
+  const identity = requestIdentity ?? trackOperation(() => repository.ensureUser(principal.id, { email: principal.email, displayName: principal.displayName }));
   const requireHuman = () => {
     if (principal.source === 'api_key') throw new Error('This operation requires an interactive user.');
   };

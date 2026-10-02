@@ -107,7 +107,7 @@ describe('Web management security', () => {
       .mockResolvedValueOnce({ rows: [{ id: '30000000-0000-4000-8000-000000000003' }] })
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({}) };
-    const database = { pool: { connect: vi.fn().mockResolvedValue(client) }, query: vi.fn().mockResolvedValue({}) };
+    const database = { pool: { connect: vi.fn().mockResolvedValue(client) }, query: vi.fn().mockResolvedValue({ rows: [] }) };
     const disabled = loadConfig({ ...config as never, PUBLIC_BASE_URL: config.publicBaseUrl,
       DATABASE_URL: config.database.connectionString, CONFIG_ENCRYPTION_KEY: config.setup.encryptionKey,
       MCP_API_KEYS: '', AUTH: 'false' } as never);

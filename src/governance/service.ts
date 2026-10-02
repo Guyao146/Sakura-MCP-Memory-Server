@@ -9,13 +9,13 @@ export class MemoryGovernanceService {
   private readonly memories: MemoryRepository;
   constructor(private readonly database: Database) { this.memories = new MemoryRepository(database); }
 
-  async listConflicts(userId: string, spaceId: string, status: 'open'|'resolved'|'dismissed' = 'open') {
+  async listConflicts(userId: string, spaceId: string, status: 'open'|'resolved'|'dismissed' = 'open', limit = 200) {
     await requireSpaceRole(this.database, userId, spaceId, 'viewer');
     const result = await this.database.query(
       `SELECT mc.*,a.type AS memory_a_type,a.content AS memory_a_content,a.summary AS memory_a_summary,
        b.type AS memory_b_type,b.content AS memory_b_content,b.summary AS memory_b_summary
        FROM memory_conflicts mc JOIN memories a ON a.id=mc.memory_a_id JOIN memories b ON b.id=mc.memory_b_id
-       WHERE mc.space_id=$1 AND mc.status=$2 ORDER BY mc.created_at DESC`, [spaceId, status]);
+       WHERE mc.space_id=$1 AND mc.status=$2 ORDER BY mc.created_at DESC LIMIT $3`, [spaceId, status, limit]);
     return result.rows;
   }
 
@@ -43,19 +43,24 @@ export class MemoryGovernanceService {
       return { duplicateOf: exact.rows[0].id, conflicts: [] };
     }
 
-    const vector = await this.database.query<{ embedding: string; dimensions: number }>(
-      `SELECT embedding::text,dimensions FROM memory_embeddings WHERE memory_id=$1 AND status='ready'`, [memory.id]);
+    const vector = await this.database.query<{ embedding: string; dimensions: number; model: string }>(
+      `SELECT embedding::text,dimensions,model FROM memory_embeddings WHERE memory_id=$1 AND status='ready'`, [memory.id]);
     if (!vector.rows[0]) return { duplicateOf: null, conflicts: [] };
-    const source = parseVector(vector.rows[0].embedding);
-    const candidates = await this.database.query<{ id: string; content: string; embedding: string }>(
-      `SELECT m.id,m.content,me.embedding::text FROM memories m JOIN memory_embeddings me ON me.memory_id=m.id
+    const source = vector.rows[0];
+    // Rank candidates by pgvector cosine distance (= 1 - similarity) inside
+    // PostgreSQL. The previous implementation shipped up to 500 embedding
+    // strings (~750 KB at 1536 dimensions) to Node for a JS cosine loop on
+    // every write; only the surviving ids now cross the wire.
+    const similar = await this.database.query<{ id: string; distance: number }>(
+      `SELECT m.id, me.embedding <=> $4::vector AS distance FROM memories m JOIN memory_embeddings me ON me.memory_id=m.id
        WHERE m.space_id=$1 AND m.id<>$2 AND m.status='active' AND m.deleted_at IS NULL
-       AND me.status='ready' AND me.dimensions=$3 ORDER BY m.updated_at DESC LIMIT 500`,
-      [memory.space_id, memory.id, vector.rows[0].dimensions]);
+       AND me.status='ready' AND me.dimensions=$3 AND me.model=$5
+       AND me.embedding <=> $4::vector <= $6
+       ORDER BY me.embedding <=> $4::vector LIMIT 20`,
+      [memory.space_id, memory.id, source.dimensions, source.embedding, source.model, 1 - CONFLICT_SIMILARITY]);
     const conflicts = [];
-    for (const candidate of candidates.rows) {
-      const similarity = cosine(source, parseVector(candidate.embedding));
-      if (similarity < 0.88) continue;
+    for (const candidate of similar.rows) {
+      const similarity = 1 - candidate.distance;
       const result = await this.database.query<{ id: string }>(
         `INSERT INTO memory_conflicts(space_id,memory_a_id,memory_b_id,reason)
          VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING RETURNING id`,
@@ -132,9 +137,5 @@ export class MemoryGovernanceService {
   }
 }
 
-function parseVector(value: string): number[] { return value.slice(1, -1).split(',').map(Number); }
-function cosine(left: number[], right: number[]): number {
-  let dot=0; let a=0; let b=0;
-  for(let i=0;i<left.length;i+=1){dot+=left[i]*right[i];a+=left[i]**2;b+=right[i]**2;}
-  return a&&b ? dot/(Math.sqrt(a)*Math.sqrt(b)) : 0;
-}
+/** Memories whose embedding cosine similarity is at least this high are flagged for human review. */
+const CONFLICT_SIMILARITY = 0.88;

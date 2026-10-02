@@ -118,6 +118,67 @@ export class SemanticMemoryService {
     return { memoryId, status };
   }
 
+  /**
+   * Rebuilds embeddings for a page of memories with one Provider round trip per
+   * batch instead of one per memory (the dominant cost of a rebuild). Access is
+   * authorized once for the space, but every memory still goes through the same
+   * pending/ready store as the single-memory path, so the revision fence and
+   * request supersession behave exactly as before.
+   */
+  async rebuildEmbeddings(userId: string, spaceId: string, memoryIds: string[], signal?: AbortSignal): Promise<Array<{ memoryId: string; status: string; error?: string }>> {
+    signal = operationSignal(signal);
+    signal?.throwIfAborted();
+    const results: Array<{ memoryId: string; status: string; error?: string }> = [];
+    if (!memoryIds.length) return results;
+    await requireSpaceRole(this.database, userId, spaceId, 'editor');
+    const resolved = await this.resolve(userId, spaceId, 'embedding');
+    signal?.throwIfAborted();
+    const rows = await this.database.query<MemoryRecord>(
+      `SELECT m.* FROM memories m WHERE m.space_id=$1 AND m.id=ANY($2) AND m.deleted_at IS NULL`, [spaceId, memoryIds]);
+    for (const memoryId of memoryIds.filter(id => !rows.rows.some(row => row.id === id))) {
+      results.push({ memoryId, status: 'failed', error: 'Memory not found or access denied.' });
+    }
+    if (!rows.rows.length) return results;
+    if (!resolved?.embeddingModel) {
+      for (const memory of rows.rows) {
+        await this.storeEmbedding(memory, randomUUID(), 'unconfigured', contentHashOf(memory), 'failed', undefined, 'No Embedding Provider configured.');
+        results.push({ memoryId: memory.id, status: 'failed', error: 'No Embedding Provider configured.' });
+      }
+      return results;
+    }
+    const model = resolved.embeddingModel;
+    const requestId = randomUUID();
+    for (const batch of embeddingBatches(rows.rows)) {
+      signal?.throwIfAborted();
+      // Claim the pending slot for the whole batch before any Provider call.
+      await Promise.all(batch.map(memory => this.storeEmbedding(memory, requestId, model, contentHashOf(memory), 'pending')));
+      let embeddings: number[][];
+      try {
+        embeddings = await resolved.provider.embed(batch.map(embeddingText), model, signal);
+        signal?.throwIfAborted();
+      } catch (error) {
+        signal?.throwIfAborted();
+        const message = error instanceof Error ? error.message : 'Embedding failed.';
+        for (const memory of batch) {
+          await this.storeEmbedding(memory, requestId, model, contentHashOf(memory), 'failed', undefined, message);
+          results.push({ memoryId: memory.id, status: 'failed', error: message });
+        }
+        continue;
+      }
+      for (const [index, memory] of batch.entries()) {
+        const embedding = embeddings[index];
+        if (!embedding?.length || embedding.some(value => !Number.isFinite(value))) {
+          await this.storeEmbedding(memory, requestId, model, contentHashOf(memory), 'failed', undefined, 'Provider returned an invalid embedding.');
+          results.push({ memoryId: memory.id, status: 'failed', error: 'Provider returned an invalid embedding.' });
+        } else {
+          const stored = await this.storeEmbedding(memory, requestId, model, contentHashOf(memory), 'ready', embedding);
+          results.push({ memoryId: memory.id, status: stored ? 'ready' : 'superseded' });
+        }
+      }
+    }
+    return results;
+  }
+
   async extractAndRemember(userId: string, spaceId: string, text: string, sourceAgent?: string) {
     const candidates = await this.extract(userId, spaceId, text);
     const strategy = await this.strategy(userId, spaceId);
@@ -139,8 +200,8 @@ export class SemanticMemoryService {
     signal?.throwIfAborted();
     const resolved = await this.resolve(userId, memory.space_id, 'embedding');
     signal?.throwIfAborted();
-    const content = `${memory.summary}\n${memory.content}\n${memory.tags.join(' ')}`.trim();
-    const contentHash = createHash('sha256').update(content).digest('hex');
+    const content = embeddingText(memory);
+    const contentHash = contentHashOf(memory);
     const requestId = randomUUID();
     if (!resolved?.embeddingModel) {
       await this.storeEmbedding(memory, requestId, 'unconfigured', contentHash, 'failed', undefined, 'No Embedding Provider configured.');
@@ -200,4 +261,36 @@ export class SemanticMemoryService {
     if (capability === 'embedding' && !resolved.embeddingModel) return undefined;
     return resolved;
   }
+}
+
+/** The text that gets embedded for a memory; must stay stable across rebuilds. */
+function embeddingText(memory: MemoryRecord): string {
+  return `${memory.summary}\n${memory.content}\n${memory.tags.join(' ')}`.trim();
+}
+
+function contentHashOf(memory: MemoryRecord): string {
+  return createHash('sha256').update(embeddingText(memory)).digest('hex');
+}
+
+/**
+ * Splits memories into Provider requests small enough for common input limits:
+ * at most 16 texts or 2 MiB of content per round trip. A single oversized
+ * memory keeps its own batch so one bad row cannot fail the whole page.
+ */
+function embeddingBatches(memories: MemoryRecord[]): MemoryRecord[][] {
+  const chunks: MemoryRecord[][] = [];
+  let current: MemoryRecord[] = [];
+  let bytes = 0;
+  for (const memory of memories) {
+    const size = Buffer.byteLength(embeddingText(memory), 'utf8');
+    if (current.length && (current.length >= 16 || bytes + size > 2_097_152)) {
+      chunks.push(current);
+      current = [];
+      bytes =  0;
+    }
+    current.push(memory);
+    bytes += size;
+  }
+  if (current.length) chunks.push(current);
+  return chunks;
 }

@@ -33,6 +33,7 @@ const environmentSchema = z.object({
   WORKER_ENABLED: z.enum(['true', 'false']).default('true'),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().min(250).max(60000).default(2000),
   WORKER_STALE_AFTER_SECONDS: z.coerce.number().int().min(30).max(86400).default(900),
+  MAX_REQUEST_BODY_BYTES: z.coerce.number().int().min(1024).max(64 * 1024 * 1024).default(6 * 1024 * 1024),
   TRUST_PROXY: z.enum(['true', 'false']).default('false'),
   RATE_LIMIT_MCP_PER_MINUTE: z.coerce.number().int().min(1).max(10000).default(120),
   RATE_LIMIT_WEB_PER_MINUTE: z.coerce.number().int().min(1).max(10000).default(300),
@@ -59,7 +60,7 @@ export interface AppConfig {
   ollama?: { baseUrl: string; chatModel?: string; embeddingModel?: string };
   embedding?: { baseUrl: string; apiKey?: string; model?: string };
   worker: { enabled: boolean; pollIntervalMs: number; staleAfterSeconds: number };
-  security: { trustProxy: boolean; mcpPerMinute: number; webPerMinute: number; authPerMinute: number; setupPerMinute: number };
+  security: { maxBodyBytes: number; trustProxy: boolean; mcpPerMinute: number; webPerMinute: number; authPerMinute: number; setupPerMinute: number };
   auditLogPath: string;
 }
 
@@ -95,7 +96,7 @@ export function loadConfig(env = process.env): AppConfig {
     ollama: value.OLLAMA_BASE_URL ? { baseUrl: value.OLLAMA_BASE_URL.replace(/\/$/, ''), chatModel: value.OLLAMA_CHAT_MODEL || undefined, embeddingModel: value.OLLAMA_EMBEDDING_MODEL || undefined } : undefined,
     embedding: value.EMBEDDING_BASE_URL ? { baseUrl: value.EMBEDDING_BASE_URL.replace(/\/$/, ''), apiKey: value.EMBEDDING_API_KEY || undefined, model: value.EMBEDDING_MODEL || undefined } : undefined,
     worker: { enabled: value.WORKER_ENABLED === 'true', pollIntervalMs: value.WORKER_POLL_INTERVAL_MS, staleAfterSeconds: value.WORKER_STALE_AFTER_SECONDS },
-    security: { trustProxy: value.TRUST_PROXY === 'true', mcpPerMinute: value.RATE_LIMIT_MCP_PER_MINUTE,
+    security: { maxBodyBytes: value.MAX_REQUEST_BODY_BYTES, trustProxy: value.TRUST_PROXY === 'true', mcpPerMinute: value.RATE_LIMIT_MCP_PER_MINUTE,
       webPerMinute: value.RATE_LIMIT_WEB_PER_MINUTE, authPerMinute: value.RATE_LIMIT_AUTH_PER_MINUTE,
       setupPerMinute: value.RATE_LIMIT_SETUP_PER_MINUTE },
     auditLogPath: value.AUDIT_LOG_PATH

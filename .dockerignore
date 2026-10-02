@@ -1,6 +1,14 @@
-node_modules
-dist
-.git
-.env
-coverage
-npm-debug.log*
+# Only inputs consumed by Dockerfile enter the build context.
+**
+!Dockerfile
+!.dockerignore
+!package.json
+!package-lock.json
+!tsconfig.json
+!src/
+!src/**
+!migrations/
+!migrations/**
+!scripts/
+!scripts/container-entrypoint.sh
+!scripts/healthcheck.mjs

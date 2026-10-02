@@ -1,5 +1,6 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import type { Stats } from 'node:fs';
 
 /**
  * Reads Cline's on-disk task history. Cline (extension id
@@ -9,7 +10,15 @@ import { join } from 'node:path';
  */
 
 export interface ClineMessage { role: string; content: unknown; }
-export interface ClineTask { taskId: string; path: string; modifiedAt: number; messageCount: number; }
+export interface ClineTask { taskId: string; path: string; modifiedAt: number; messageCount: number; fingerprint: string; }
+
+function fingerprint(path: string, info: Stats): string {
+  return JSON.stringify([resolve(path), info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs]);
+}
+
+export async function historyFingerprint(path: string): Promise<string> {
+  return fingerprint(path, await stat(path));
+}
 
 const HISTORY_FILE = 'api_conversation_history.json';
 
@@ -26,7 +35,7 @@ export async function listTasks(tasksDir: string, signal?: AbortSignal): Promise
     try {
       const info = await stat(path);
       if (!info.isFile()) continue;
-      tasks.push({ taskId: entry, path, modifiedAt: info.mtimeMs, messageCount: 0 });
+      tasks.push({ taskId: entry, path, modifiedAt: info.mtimeMs, messageCount: 0, fingerprint: fingerprint(path, info) });
     } catch { continue; }
   }
   return tasks.sort((a, b) => a.modifiedAt - b.modifiedAt);

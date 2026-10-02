@@ -82,6 +82,37 @@ describeDatabase('PostgreSQL installation integration', () => {
     expect(await admin(owner.userId)).toBe(true);
   });
 
+  it('keeps repeated identity lookups read-only, but repairs profile, membership and expired activity', async () => {
+    const repository = new MemoryRepository(database);
+    const identity = await repository.ensureUser('identity-fast-path', { displayName: 'Initial' });
+    const connect = vi.spyOn(database.pool, 'connect');
+    try {
+      await expect(repository.ensureUser('identity-fast-path')).resolves.toEqual(identity);
+      // One pool checkout for Database.query, rather than another transactional checkout.
+      expect(connect).toHaveBeenCalledTimes(1);
+    } finally { connect.mockRestore(); }
+    await repository.ensureUser('identity-fast-path', { displayName: 'Updated' });
+    expect((await database.query('SELECT display_name FROM users WHERE id=$1', [identity.userId])).rows[0].display_name).toBe('Updated');
+    await database.query('DELETE FROM space_members WHERE space_id=$1 AND user_id=$2', [identity.personalSpaceId, identity.userId]);
+    await repository.ensureUser('identity-fast-path');
+    expect((await database.query('SELECT role FROM space_members WHERE space_id=$1 AND user_id=$2',
+      [identity.personalSpaceId, identity.userId])).rows[0].role).toBe('owner');
+    await database.query("UPDATE users SET last_login_at=now()-interval '1 hour' WHERE id=$1", [identity.userId]);
+    await repository.ensureUser('identity-fast-path');
+    expect((await database.query("SELECT last_login_at>now()-interval '1 minute' AS recent FROM users WHERE id=$1", [identity.userId])).rows[0].recent).toBe(true);
+  });
+
+  it('throttles memory access statistics without writing a new content revision', async () => {
+    const repository = new MemoryRepository(database);
+    const owner = await repository.ensureUser('access-statistics');
+    const memory = await repository.remember(owner.userId, { spaceId: owner.personalSpaceId, type: 'fact', content: 'stats test' });
+    await repository.get(owner.userId, memory.id);
+    const first = (await database.query('SELECT last_accessed_at,embedding_revision,xmin::text FROM memories WHERE id=$1', [memory.id])).rows[0];
+    await repository.get(owner.userId, memory.id);
+    const second = (await database.query('SELECT last_accessed_at,embedding_revision,xmin::text FROM memories WHERE id=$1', [memory.id])).rows[0];
+    expect(second).toEqual(first);
+  });
+
   it('reveals Agent secrets on demand and refuses legacy or revoked credentials', async () => {
     const memory = new MemoryRepository(database);
     const owner = await memory.ensureUser('agent-reveal-owner', { displayName: 'Reveal Owner' });

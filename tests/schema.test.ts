@@ -2,6 +2,18 @@ import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 
 describe('memory database schema', () => {
+  it('keeps application layers root-owned and whitelists only build inputs', async () => {
+    const dockerfile = await readFile(new URL('../Dockerfile', import.meta.url), 'utf8');
+    const ignore = await readFile(new URL('../.dockerignore', import.meta.url), 'utf8');
+    expect(dockerfile).not.toContain('chown -R');
+    expect(dockerfile).toContain('install -d -o mcp -g mcp -m 0700 /app/data');
+    expect(dockerfile).toContain('--uid 10001 --gid mcp');
+    expect(ignore.split(/\r?\n/)).toContain('**');
+    for (const input of ['package.json', 'package-lock.json', 'tsconfig.json', 'src/**', 'migrations/**',
+      'scripts/container-entrypoint.sh', 'scripts/healthcheck.mjs']) expect(ignore.split(/\r?\n/)).toContain(`!${input}`);
+    expect(ignore).not.toContain('!tools');
+  });
+
   it('defines every multi-tenant memory platform table', async () => {
     const sql = await readFile(new URL('../migrations/001_memory_platform.sql', import.meta.url), 'utf8');
     for (const table of [

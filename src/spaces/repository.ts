@@ -29,11 +29,11 @@ export class SpaceRepository {
     finally { client.release(); }
   }
 
-  async members(userId: string, spaceId: string) {
+  async members(userId: string, spaceId: string, limit = 200) {
     await requireSpaceRole(this.database, userId, spaceId, 'viewer');
     const result = await this.database.query(
       `SELECT u.id,u.email,u.display_name,u.avatar_url,sm.role,sm.created_at
-       FROM space_members sm JOIN users u ON u.id=sm.user_id WHERE sm.space_id=$1 ORDER BY sm.created_at`, [spaceId]);
+       FROM space_members sm JOIN users u ON u.id=sm.user_id WHERE sm.space_id=$1 ORDER BY sm.created_at LIMIT $2`, [spaceId, limit]);
     return result.rows;
   }
 

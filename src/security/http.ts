@@ -28,7 +28,7 @@ export function securityHeaders() {
 
 export class RateLimiter {
   private readonly buckets = new Map<string, Bucket>();
-  constructor(private readonly windowMs = 60_000) {}
+  constructor(private readonly windowMs = 60_000, private readonly maxBuckets = 20_000) {}
 
   middleware(name: string, limit: number, trustProxy: boolean) {
     return async (context: Context, next: Next) => {
@@ -45,13 +45,25 @@ export class RateLimiter {
         context.header('Retry-After', String(Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))));
         return context.json({ error: 'rate_limited', error_description: 'Too many requests.' }, 429);
       }
-      if (this.buckets.size > 10_000) this.cleanup(now);
+      if (this.buckets.size > this.maxBuckets) this.cleanup(now);
       await next();
     };
   }
 
   private cleanup(now: number): void {
     for (const [key, bucket] of this.buckets) if (bucket.resetAt <= now) this.buckets.delete(key);
+    // A flood from many distinct clients can keep the map full of live buckets
+    // forever; drop the oldest ones so the counter stays bounded. Map preserves
+    // insertion order, so this evicts the longest-lived windows first.
+    if (this.buckets.size > this.maxBuckets) {
+      const excess = this.buckets.size - this.maxBuckets;
+      let removed = 0;
+      for (const key of this.buckets.keys()) {
+        if (removed >= excess) break;
+        this.buckets.delete(key);
+        removed += 1;
+      }
+    }
   }
 }
 

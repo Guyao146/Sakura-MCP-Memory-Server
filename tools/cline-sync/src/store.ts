@@ -10,7 +10,11 @@ import { dataDir, normalizeConfig, type SyncConfig } from './config.js';
  * avoiding duplicate memories.
  */
 
-export type Cursors = Record<string, { messageCount: number; syncedAt: string; messageOffset?: number; messageHash?: string }>;
+export type Cursors = Record<string, {
+  messageCount: number; syncedAt: string; messageOffset?: number; messageHash?: string;
+  /** Metadata only, never message contents. Written only for a fully synced snapshot. */
+  history?: { fingerprint: string; messageCount: number };
+}>;
 
 function configPath(dir = dataDir()): string { return join(dir, 'config.json'); }
 function cursorsPath(dir = dataDir()): string { return join(dir, 'cursors.json'); }

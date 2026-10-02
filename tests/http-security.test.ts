@@ -66,4 +66,21 @@ describe('HTTP production security', () => {
     expect((await app.request('/', { headers: { 'X-Forwarded-For': '198.51.100.2' } })).status).toBe(200);
     expect((await app.request('/', { headers: { 'X-Forwarded-For': '198.51.100.1' } })).status).toBe(429);
   });
+
+  it('caps the bucket map so a rotating-client flood cannot grow it forever', async () => {
+    const app = new Hono();
+    const limiter = new RateLimiter(60_000, 1000);
+    app.use('*', limiter.middleware('flood', Number.MAX_SAFE_INTEGER, true));
+    app.get('/', context => context.text('ok'));
+    // Distinct spoofed-proxy addresses each create a live bucket; without a cap
+    // these accumulate unboundedly for the whole window.
+    for (let i = 0; i < 3000; i += 1) {
+      const response = await app.request('/', { headers: { 'X-Forwarded-For': `198.51.${i >> 8}.${i & 255}` } });
+      expect(response.status).toBe(200);
+    }
+    // The private map is bounded; the hard cap cannot be read directly, so
+    // observe it through a spy on the cleanup path instead.
+    const buckets = (limiter as unknown as { buckets: Map<string, unknown> }).buckets;
+    expect(buckets.size).toBeLessThanOrEqual(1000);
+  });
 });

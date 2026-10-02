@@ -1,3 +1,6 @@
+import type { Context } from 'hono';
+import { isJsonContentType } from '@modelcontextprotocol/server';
+
 export function isRootMcpRequest(method: string, headers: Headers): boolean {
   const normalizedMethod = method.toUpperCase();
   if (normalizedMethod !== 'GET' && normalizedMethod !== 'HEAD') return true;
@@ -6,6 +9,18 @@ export function isRootMcpRequest(method: string, headers: Headers): boolean {
   if (headers.has('authorization') || headers.has('mcp-protocol-version') || headers.has('mcp-session-id')) return true;
   return accept.includes('text/event-stream');
 }
+/**
+ * Reads the buffered JSON-RPC body once, so neither this layer nor the SDK
+ * parses it again. Malformed JSON is answered with the same JSON-RPC Parse
+ * Error (-32700) the SDK produces, instead of a plain-text 400. The returned
+ * `Response` must short-circuit the request.
+ */
+export async function readMcpBody(context: Context): Promise<unknown> {
+  if (context.req.method !== 'POST' || !isJsonContentType(context.req.header('content-type'))) return undefined;
+  try { return await context.req.json(); }
+  catch { return context.json({ jsonrpc: '2.0', error: { code: -32700, message: 'Parse error: Invalid JSON' }, id: null }, 400); }
+}
+
 /**
  * Wraps a streaming Response so that `cleanup` runs only after the body has
  * fully flushed, errored, or been cancelled by the client — never before the

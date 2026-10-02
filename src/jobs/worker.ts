@@ -98,30 +98,38 @@ export class BackgroundWorker {
        AND deleted_at IS NULL AND created_at<=$2`, [job.space_id, snapshot]);
     const errors: Array<{ memoryId: string; message: string }> = [];
     let completed = 0; let failed = 0; let cursor: string | null = null;
-    job.progress = { total: Number(count.rows[0].total), completed, failed, errors };
+    let lastProgressRows = 0; let lastProgressAt = Date.now();
+    const total = Number(count.rows[0].total);
+    job.progress = { total, completed, failed, errors };
     while (true) {
       signal.throwIfAborted();
       // Keyset pagination bounds retained IDs even for very large spaces.
-      const ids: { rows: Array<{ id: string }> } = await this.database.query<{ id: string }>(
+      const page: { rows: Array<{ id: string }> } = await this.database.query<{ id: string }>(
         `SELECT id FROM memories WHERE space_id=$1 AND status IN ('active','pending_confirmation')
          AND deleted_at IS NULL AND created_at<=$2 AND ($3::uuid IS NULL OR id>$3::uuid) ORDER BY id LIMIT 100`,
         [job.space_id, snapshot, cursor]);
-      if (!ids.rows.length) return;
-      for (const row of ids.rows) {
+      if (!page.rows.length) return;
+      // One Provider round trip per sub-batch instead of one per memory.
+      const results = await this.semantic.rebuildEmbeddings(job.requested_by, job.space_id,
+        page.rows.map(row => row.id), signal);
+      for (const result of results) {
         signal.throwIfAborted();
-        try {
-          const result = await this.semantic.rebuildEmbedding(job.requested_by, row.id, signal);
-          signal.throwIfAborted();
-          if (result.status === 'failed') throw new Error('Embedding failed; see memory_embeddings.error.');
-          completed += 1;
-        } catch (error) {
-          signal.throwIfAborted();
+        if (result.status === 'failed') {
           failed += 1;
-          if (errors.length < 100) errors.push({ memoryId: row.id, message: error instanceof Error ? error.message : 'Embedding failed.' });
-        }
-        job.progress = { total: Number(count.rows[0].total), completed, failed, errors: [...errors] };
+          if (errors.length < 100) errors.push({ memoryId: result.memoryId, message: result.error ?? 'Embedding failed.' });
+        } else completed += 1;
+      }
+      cursor = page.rows[page.rows.length - 1].id;
+      job.progress = { total, completed, failed, errors };
+      const rows = completed + failed;
+      // Throttle progress writes to every 25 rows or 5 seconds — plus the first
+      // page so a small job persists its checkpoint early: cancellation is
+      // observed per row through the abort signal, the heartbeat keeps the lease
+      // alive, and complete()/fail() always persist the final state.
+      if (lastProgressRows === 0 || rows - lastProgressRows >= 25 || Date.now() - lastProgressAt > 5000) {
+        lastProgressRows = rows;
+        lastProgressAt = Date.now();
         if (await this.jobs.progress(job.id, job.progress, this.id)) throw new JobInterrupted('Job cancelled or lease lost.');
-        cursor = row.id;
       }
     }
   }

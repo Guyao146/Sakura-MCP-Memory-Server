@@ -25,16 +25,16 @@ function fixture() {
   const fail = vi.spyOn(JobRepository.prototype, 'fail').mockResolvedValue();
   const query = vi.fn().mockResolvedValueOnce({ rows: [{ total: '2' }] })
     .mockResolvedValueOnce({ rows: [{ id: 'a' }, { id: 'b' }] }).mockResolvedValue({ rows: [] });
-  const rebuild = vi.fn().mockResolvedValue({ status: 'ready' });
+  const rebuild = vi.fn().mockResolvedValue([{ memoryId: 'a', status: 'ready' }]);
   const log = { info: vi.fn(), error: vi.fn() };
   const worker = new BackgroundWorker({ query } as unknown as Database,
-    { rebuildEmbedding: rebuild } as unknown as SemanticMemoryService, 1000, 30, log);
+    { rebuildEmbeddings: rebuild } as unknown as SemanticMemoryService, 1000, 30, log);
   workers.push(worker);
   return { worker, job, claim, heartbeat, progress, complete, release, fail, query, rebuild, log };
 }
 function stall(rebuild: ReturnType<typeof vi.fn>) {
   const started = deferred<AbortSignal>();
-  rebuild.mockImplementationOnce((_user, _id, signal: AbortSignal) => new Promise((_resolve, reject) => {
+  rebuild.mockImplementationOnce((_user, _space, _ids, signal: AbortSignal) => new Promise((_resolve, reject) => {
     started.resolve(signal);
     signal.addEventListener('abort', () => reject(signal.reason), { once: true });
   }));
@@ -100,9 +100,11 @@ describe('background worker lifecycle', () => {
     f.query.mockReset().mockResolvedValueOnce({ rows: [{ total: '205' }] });
     for (const size of [100, 100, 5]) f.query.mockResolvedValueOnce({ rows: Array.from({ length: size }, (_, i) => ({ id: String(i) })) });
     f.query.mockResolvedValue({ rows: [] });
-    f.rebuild.mockResolvedValue({ status: 'failed' });
+    f.rebuild.mockImplementation(async (_user: string, _space: string, ids: string[]) =>
+      ids.map(id => ({ memoryId: id, status: 'failed', error: 'boom' })));
     await f.worker.runOnce();
-    expect(f.rebuild).toHaveBeenCalledTimes(205);
+    // One batched Provider round trip per page of 100 instead of one per memory.
+    expect(f.rebuild.mock.calls.map(([, , ids]) => (ids as string[]).length)).toEqual([100, 100, 5]);
     expect(f.job.progress).toMatchObject({ completed: 0, failed: 205 });
     expect(f.job.progress.errors).toHaveLength(100);
     expect(f.query.mock.calls.slice(1).every(([sql]) => sql.includes('LIMIT 100'))).toBe(true);

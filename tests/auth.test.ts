@@ -10,6 +10,23 @@ const config = loadConfig({
 });
 
 describe('AuthService API keys', () => {
+  it('still checks revocation on every Agent authentication while throttling statistics', async () => {
+    const calls: string[] = [];
+    let revoked = false;
+    const database = { query: async (sql: string) => {
+      calls.push(sql);
+      return { rows: !revoked && sql.startsWith('SELECT') ? [{ agent_id: 'agent', oidc_subject: 'owner',
+        email: null, display_name: 'Owner', scopes: ['memory:read'], expires_at: null }] : [] };
+    } };
+    const service = new AuthService(config, database as never);
+    await service.authenticate('Bearer sk_sakura_test');
+    expect(calls[1]).toContain("last_used_at < now()-interval '5 minutes'");
+    revoked = true;
+    await expect(service.authenticate('Bearer sk_sakura_test')).rejects.toThrow('Invalid credential');
+    expect(calls.filter(sql => sql.startsWith('SELECT'))).toHaveLength(2);
+    expect(calls[2]).toContain('ac.revoked_at IS NULL');
+  });
+
   it('authenticates a configured API key', async () => {
     const principal = await new AuthService(config).authenticate('Bearer correct-secret');
     expect(principal).toMatchObject({ id: 'trusted', source: 'api_key', scopes: ['memory:read', 'memory:write'] });
