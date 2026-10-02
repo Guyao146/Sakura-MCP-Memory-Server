@@ -13,9 +13,13 @@ export class McpClient {
   constructor(private readonly url: string, private readonly token: string,
     private readonly fetchImpl: typeof fetch = fetch) {}
 
-  private async rpc(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
+  private async rpc(method: string, params: unknown, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
+    signal?.throwIfAborted();
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const abort = () => controller.abort(signal?.reason);
+    signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => controller.abort(new Error('MCP 请求超时')), timeoutMs);
+    timer.unref?.();
     try {
       const response = await this.fetchImpl(this.url, {
         method: 'POST',
@@ -30,22 +34,26 @@ export class McpClient {
       const body = await response.text();
       if (!response.ok) throw new Error(`HTTP ${response.status}: ${firstLine(body)}`);
       return parseSse(body);
-    } finally { clearTimeout(timer); }
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+    }
   }
 
   /** Confirms the endpoint and credential work before syncing. */
-  async initialize(timeoutMs = 20_000): Promise<void> {
+  async initialize(timeoutMs = 20_000, signal?: AbortSignal): Promise<void> {
     const result = await this.rpc('initialize', {
       protocolVersion: PROTOCOL_VERSION, capabilities: {},
       clientInfo: { name: 'sakura-cline-sync', version: '0.2.0' }
-    }, timeoutMs) as { error?: { message?: string } };
+    }, timeoutMs, signal) as { error?: { message?: string } };
     if (result?.error) throw new Error(result.error.message ?? 'initialize failed');
   }
 
-  async extractAndRemember(text: string, spaceId: string | undefined, timeoutMs = 120_000): Promise<McpCallResult> {
+  async extractAndRemember(text: string, spaceId: string | undefined, timeoutMs = 120_000,
+    signal?: AbortSignal): Promise<McpCallResult> {
     const args: Record<string, unknown> = { text };
     if (spaceId) args.space_id = spaceId;
-    const parsed = await this.rpc('tools/call', { name: 'memory_extract_and_remember', arguments: args }, timeoutMs) as {
+    const parsed = await this.rpc('tools/call', { name: 'memory_extract_and_remember', arguments: args }, timeoutMs, signal) as {
       error?: { message?: string };
       result?: { isError?: boolean; content?: Array<{ type?: string; text?: string }> };
     };

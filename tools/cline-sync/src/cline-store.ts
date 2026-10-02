@@ -13,12 +13,15 @@ export interface ClineTask { taskId: string; path: string; modifiedAt: number; m
 
 const HISTORY_FILE = 'api_conversation_history.json';
 
-export async function listTasks(tasksDir: string): Promise<ClineTask[]> {
+export async function listTasks(tasksDir: string, signal?: AbortSignal): Promise<ClineTask[]> {
+  signal?.throwIfAborted();
   let entries: string[];
   try { entries = await readdir(tasksDir); }
-  catch { return []; }
+  catch { signal?.throwIfAborted(); return []; }
+  signal?.throwIfAborted();
   const tasks: ClineTask[] = [];
   for (const entry of entries) {
+    signal?.throwIfAborted();
     const path = join(tasksDir, entry, HISTORY_FILE);
     try {
       const info = await stat(path);
@@ -29,8 +32,9 @@ export async function listTasks(tasksDir: string): Promise<ClineTask[]> {
   return tasks.sort((a, b) => a.modifiedAt - b.modifiedAt);
 }
 
-export async function readMessages(historyPath: string): Promise<ClineMessage[]> {
-  const raw = await readFile(historyPath, 'utf8');
+export async function readMessages(historyPath: string, signal?: AbortSignal): Promise<ClineMessage[]> {
+  const raw = await readFile(historyPath, { encoding: 'utf8', signal });
+  signal?.throwIfAborted();
   let parsed: unknown;
   try { parsed = JSON.parse(raw); }
   catch { throw new Error(`对话历史不是合法 JSON：${historyPath}`); }

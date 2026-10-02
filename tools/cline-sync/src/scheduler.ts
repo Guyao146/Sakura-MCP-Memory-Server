@@ -1,5 +1,5 @@
 /**
- * Scheduler wrapping the sync engine: fixed-interval scans, single-flight
+ * Scheduler wrapping the sync engine: completion-based scans, single-flight
  * guarding (a long extraction never overlaps with the next tick), and status the
  * tray and config panel can read.
  */
@@ -20,6 +20,7 @@ export interface SchedulerOptions {
   /** Pre-loaded history so `lastRunAt` survives a restart of the daemon. */
   history?: SyncHistory;
   /** Overrides the sync entry point for tests. */
+  saveHistoryImpl?: typeof saveHistory;
   runSyncImpl?: typeof runSync;
 }
 
@@ -34,6 +35,11 @@ export class SyncScheduler {
   private halted = false;
   private history: SyncHistory;
   private readonly runSyncImpl: typeof runSync;
+  private readonly saveHistoryImpl: typeof saveHistory;
+  private scheduled = false;
+  private closed = false;
+  private controller?: AbortController;
+  private inFlight?: Promise<SyncSummary | undefined>;
 
   constructor(
     private config: SyncConfig,
@@ -43,6 +49,7 @@ export class SyncScheduler {
     this.history = options.history ?? emptyHistory();
     this.lastRunAt = lastRunFinishedAt(this.history);
     this.runSyncImpl = options.runSyncImpl ?? runSync;
+    this.saveHistoryImpl = options.saveHistoryImpl ?? saveHistory;
   }
 
   updateConfig(config: SyncConfig): void {
@@ -65,55 +72,88 @@ export class SyncScheduler {
 
   restart(): void {
     this.stop();
-    if (!this.config.enabled || this.halted) {
-      this.nextRunAt = null;
-      if (!this.config.enabled) this.log('自动同步已关闭');
-      else this.log('自动同步已暂停（连续失败保护）');
-      return;
-    }
-    const period = this.config.intervalMinutes * 60_000;
-    this.nextRunAt = Date.now() + period;
-    this.timer = setInterval(() => void this.runOnce(), period);
-    // Do not hold the event loop open purely for the timer.
-    this.timer.unref?.();
-    this.log(`自动同步已启用，每 ${this.config.intervalMinutes} 分钟扫描一次`);
+    if (this.closed) return;
+    this.scheduled = true;
+    this.scheduleNext();
   }
 
-  /**
-   * Schedules the timer and flushes immediately when a run is overdue. Called
-   * once at startup so a freshly booted machine does not sit idle for a whole
-   * interval before its first sync.
-   */
-  start(): void {
-    if (this.config.enabled && !this.halted) {
-      const period = this.config.intervalMinutes * 60_000;
-      const overdue = this.lastRunAt === null || Date.now() - this.lastRunAt >= period;
-      if (overdue) {
-        this.log('距上次同步已超过一个周期，立即同步一次');
-        void this.runOnce();
-      }
-    }
-    this.restart();
-  }
-
-  stop(): void {
-    if (this.timer) clearInterval(this.timer);
+  private clearTimer(): void {
+    if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
+    this.nextRunAt = null;
   }
 
-  /** Runs a scan unless one is already in flight. */
-  async runOnce(): Promise<SyncSummary | undefined> {
-    if (this.running) { this.log('上一次同步仍在进行，跳过本次触发'); return undefined; }
-    if (!this.config.mcpUrl || !this.config.token) { this.lastResult = '未配置 MCP 地址或密钥'; return undefined; }
+  /** One timeout after completion, never an interval piling up ticks during I/O. */
+  private scheduleNext(delay = this.config.intervalMinutes * 60_000): void {
+    this.clearTimer();
+    if (!this.scheduled || this.closed || this.running || !this.config.enabled || this.halted) return;
+    this.nextRunAt = Date.now() + delay;
+    this.timer = setTimeout(() => {
+      this.clearTimer();
+      void this.runOnce();
+    }, delay);
+    this.timer.unref?.();
+  }
+
+  start(): void {
+    if (this.closed || this.scheduled) return;
+    this.scheduled = true;
+    const elapsed = this.lastRunAt === null ? Infinity : Date.now() - this.lastRunAt;
+    const period = this.config.intervalMinutes * 60_000;
+    if (this.config.enabled && !this.halted && elapsed >= period) {
+      void this.runOnce();
+    } else {
+      this.scheduleNext(Math.max(0, period - elapsed));
+    }
+  }
+
+  /** Abort the active request as well as removing the next scheduled scan. */
+  stop(): void {
+    this.scheduled = false;
+    this.clearTimer();
+    this.controller?.abort();
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    this.stop();
+    await this.inFlight;
+  }
+
+  runOnce(): Promise<SyncSummary | undefined> {
+    if (this.closed || this.running) return Promise.resolve(undefined);
+    if (!this.config.mcpUrl || !this.config.token) {
+      this.lastResult = '未配置 MCP 地址或密钥';
+      this.scheduleNext();
+      return Promise.resolve(undefined);
+    }
+    this.clearTimer();
     this.running = true;
+    const controller = new AbortController();
+    this.controller = controller;
+    const pending = this.execute(controller).finally(() => {
+      this.running = false;
+      this.controller = undefined;
+      this.inFlight = undefined;
+      this.scheduleNext();
+    });
+    this.inFlight = pending;
+    return pending;
+  }
+
+  private async execute(controller: AbortController): Promise<SyncSummary | undefined> {
     try {
-      const summary = await this.runSyncImpl(this.config, { logger: this.log });
+      const summary = await this.runSyncImpl(this.config, { logger: this.log, signal: controller.signal });
       this.lastRunAt = Date.now();
-      this.recent = summary.outcomes;
+      this.recent = summary.outcomes.slice(-12);
       this.lastResult = `扫描 ${summary.scanned} 个任务：${summary.synced} 已同步 / ${summary.skipped} 跳过 / ${summary.failed} 失败`;
       this.history = recordRun(summary, this.history);
       // A failed save must never mask a successful sync.
-      await saveHistory(this.history).catch(error => this.log(`运行历史保存失败：${error instanceof Error ? error.message : error}`));
+      await this.saveHistoryImpl(this.history).catch(error => this.log(`运行历史保存失败：${error instanceof Error ? error.message : error}`));
+      if (controller.signal.aborted || summary.cancelled) {
+        this.lastResult = '同步已取消';
+        return summary;
+      }
 
       // Nothing got through at all: the server is likely down or the key revoked.
       const allFailed = summary.failed > 0 && summary.synced === 0;
@@ -128,14 +168,15 @@ export class SyncScheduler {
       this.log(this.lastResult);
       return summary;
     } catch (error) {
+      if (controller.signal.aborted) {
+        this.lastResult = '同步已取消';
+        return undefined;
+      }
       this.lastResult = `同步失败：${error instanceof Error ? error.message : String(error)}`;
       this.consecutiveFailures += 1;
       this.log(`连续 ${this.consecutiveFailures} 次同步出错：${this.lastResult}`);
       if (this.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) this.halt();
       return undefined;
-    } finally {
-      this.running = false;
-      if (this.config.enabled && !this.halted) this.nextRunAt = Date.now() + this.config.intervalMinutes * 60_000;
     }
   }
 
@@ -156,9 +197,9 @@ export class SyncScheduler {
     this.restart();
   }
 
-  async testConnection(config: SyncConfig): Promise<{ ok: boolean; error?: string }> {
+  async testConnection(config: SyncConfig, signal?: AbortSignal): Promise<{ ok: boolean; error?: string }> {
     try {
-      await new McpClient(config.mcpUrl, config.token).initialize();
+      await new McpClient(config.mcpUrl, config.token).initialize(undefined, signal);
       return { ok: true };
     } catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
   }

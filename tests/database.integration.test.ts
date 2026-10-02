@@ -35,7 +35,7 @@ describeDatabase('PostgreSQL installation integration', () => {
     const extension = await database.query<{ extversion: string }>("SELECT extversion FROM pg_extension WHERE extname='vector'");
     const migrations = await database.query<{ name: string }>('SELECT name FROM schema_migrations ORDER BY name');
     expect(extension.rows[0].extversion).toBeTruthy();
-    expect(migrations.rows.map(row => row.name)).toEqual(['001_memory_platform.sql', '002_installation.sql', '003_web_sessions.sql', '004_semantic_memory.sql', '005_memory_governance.sql', '006_background_jobs.sql', '007_audit_security.sql', '008_agent_secret_reveal.sql', '009_login_probe.sql', '010_client_sessions.sql']);
+    expect(migrations.rows.map(row => row.name)).toEqual(['001_memory_platform.sql', '002_installation.sql', '003_web_sessions.sql', '004_semantic_memory.sql', '005_memory_governance.sql', '006_background_jobs.sql', '007_audit_security.sql', '008_agent_secret_reveal.sql', '009_login_probe.sql', '010_client_sessions.sql', '011_oidc_browser_binding.sql', '012_embedding_consistency.sql']);
     await expect(settings.installation()).resolves.toMatchObject({ completed: false });
   });
 
@@ -374,6 +374,35 @@ describeDatabase('PostgreSQL installation integration', () => {
     expect(Number(embeddings.rows[0].count)).toBe(2);
   });
 
+  it('fences old owners and recovers stale cancellation and exhausted jobs', async () => {
+    const memory = new MemoryRepository(database);
+    const identity = await memory.ensureUser('lease-owner', { displayName: 'Lease Owner' });
+    const jobs = new JobRepository(database);
+    const queued = await jobs.enqueue(identity.userId, identity.personalSpaceId, 'rebuild_embeddings');
+    const old = (await jobs.claim('old-owner', 30))!;
+    expect(old.id).toBe(queued.id);
+    await database.query(`UPDATE ingestion_jobs SET locked_at=now()-interval '1 hour' WHERE id=$1`, [old.id]);
+    const current = (await jobs.claim('new-owner', 30))!;
+    expect(current.id).toBe(old.id);
+    await jobs.complete(old.id, { completed: 999 }, 'old-owner');
+    await jobs.release(old, 'old-owner');
+    await jobs.fail(old, 'stale error', {}, 'old-owner');
+    expect(await jobs.heartbeat(old.id, 'old-owner')).toBe('lost');
+    expect(await jobs.get(identity.userId, old.id)).toMatchObject({ status: 'processing', locked_by: 'new-owner' });
+    await jobs.release(current, 'new-owner');
+    expect(await jobs.get(identity.userId, old.id)).toMatchObject({ status: 'pending', attempts: 1, locked_by: null });
+    await jobs.claim('cancel-owner', 30);
+    await jobs.cancel(identity.userId, old.id);
+    await database.query(`UPDATE ingestion_jobs SET locked_at=now()-interval '1 hour' WHERE id=$1`, [old.id]);
+    expect(await jobs.claim('recovery', 30)).toBeUndefined();
+    expect(await jobs.get(identity.userId, old.id)).toMatchObject({ status: 'cancelled', locked_by: null });
+    await jobs.retry(identity.userId, old.id);
+    await jobs.claim('crashed', 30);
+    await database.query(`UPDATE ingestion_jobs SET attempts=max_attempts,locked_at=now()-interval '1 hour' WHERE id=$1`, [old.id]);
+    expect(await jobs.claim('recovery', 30)).toBeUndefined();
+    expect(await jobs.get(identity.userId, old.id)).toMatchObject({ status: 'failed', locked_by: null });
+  });
+
   it('cancels pending jobs and permits an explicit retry', async () => {
     const repository = new MemoryRepository(database);
     const identity = await repository.ensureUser('job-cancel-owner', { displayName: 'Job Cancel Owner' });
@@ -408,6 +437,71 @@ describeDatabase('PostgreSQL installation integration', () => {
     const stored = await database.query<{ metadata: Record<string,string> }>("SELECT metadata FROM audit_logs WHERE action='test.private_a' ORDER BY id DESC LIMIT 1");
     expect(stored.rows[0].metadata).toMatchObject({ apiKey: '[REDACTED]', content: '[REDACTED]', safe: 'ok' });
     await unlink(path).catch(() => undefined);
+  });
+
+  it('enforces Agent grants for jobs and unfiltered audits using real SQL', async () => {
+    const repository = new MemoryRepository(database);
+    const owner = await repository.ensureUser('agent-grant-audit-owner');
+    const shared = await new SpaceRepository(database).create(owner.userId, 'Granted space', 'Agent test');
+    const agents = new AgentRepository(database, encryptionKey);
+    const agent = await agents.create(owner.userId, 'Scoped Agent', ['memory:read', 'space:manage']);
+    await agents.grant(owner.userId, agent.id, shared.id, ['memory:read']);
+    const jobs = new JobRepository(database);
+    const privateJob = await jobs.enqueue(owner.userId, owner.personalSpaceId, 'rebuild_embeddings');
+    const sharedJob = await jobs.enqueue(owner.userId, shared.id, 'rebuild_embeddings');
+    await expect(jobs.get(owner.userId, privateJob.id, agent.id)).rejects.toThrow('not granted');
+    await expect(jobs.get(owner.userId, sharedJob.id, agent.id)).resolves.toMatchObject({ id: sharedJob.id });
+    await expect(jobs.cancel(owner.userId, sharedJob.id, agent.id)).rejects.toThrow('not granted');
+    await expect(jobs.retry(owner.userId, privateJob.id, agent.id)).rejects.toThrow('not granted');
+    const transfer = new MemoryTransferService(database, {} as never, {} as never);
+    await expect(transfer.status(owner.userId, privateJob.id, agent.id)).rejects.toThrow('not granted');
+    await database.query(`INSERT INTO audit_logs(actor_user_id,space_id,action,result)
+      VALUES($1,$2,'test.granted','success'),($1,$3,'test.private','success'),($1,NULL,'test.unscoped','success')`,
+      [owner.userId, shared.id, owner.personalSpaceId]);
+    const audit = new AuditLogger('', database);
+    const visible = await audit.list(owner.userId, { agentId: agent.id, limit: 100 });
+    expect(visible.events.map(event => event.action)).toEqual(['test.granted']);
+    await database.query("UPDATE agent_credentials SET expires_at=now()-interval '1 second' WHERE id=$1", [agent.id]);
+    expect((await audit.list(owner.userId, { agentId: agent.id, limit: 100 })).events).toEqual([]);
+  });
+
+  it('invalidates merged embeddings and includes old matches beyond 1000 newer memories', async () => {
+    const config = loadConfig({ PUBLIC_BASE_URL: 'https://mcp.example.com', DATABASE_URL: connectionString!,
+      CONFIG_ENCRYPTION_KEY: encryptionKey, OLLAMA_BASE_URL: 'http://unused', OLLAMA_EMBEDDING_MODEL: 'test' });
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ embeddings: [[1, 0]] })));
+    const semantic = new SemanticMemoryService(database, () => config);
+    const repository = semantic.repository;
+    const owner = await repository.ensureUser('consistency-owner');
+    const input = { spaceId: owner.personalSpaceId, type: 'fact' as const, content: 'ancientmatchingneedle' };
+    const first = await semantic.remember(owner.userId, input);
+    const second = await semantic.remember(owner.userId, { ...input, content: 'second memory' });
+    await database.query("UPDATE memories SET updated_at='2000-01-01' WHERE id=$1", [first.id]);
+    await database.query(`INSERT INTO memories(space_id,type,content,created_by)
+      SELECT $1,'fact','unrelated filler '||n,$2 FROM generate_series(1,1005) n`, [owner.personalSpaceId, owner.userId]);
+    expect((await semantic.hybridSearch(owner.userId, owner.personalSpaceId, 'ancientmatchingneedle', 1))[0].id).toBe(first.id);
+    const conflict = await database.query<{ id: string }>(`INSERT INTO memory_conflicts(space_id,memory_a_id,memory_b_id,reason)
+      VALUES($1,$2,$3,'integration test') RETURNING id`, [owner.personalSpaceId, first.id, second.id]);
+    await new MemoryGovernanceService(database).resolve(owner.userId, conflict.rows[0].id, 'merge', { content: 'merged new meaning' });
+    expect((await repository.get(owner.userId, first.id)).embedding_revision).toBe('1');
+    expect((await database.query('SELECT 1 FROM memory_embeddings WHERE memory_id=$1', [first.id])).rows).toHaveLength(0);
+  });
+
+  it.each(['success', 'failure'] as const)('rejects stale embedding %s after a committed content update', async outcome => {
+    const config = loadConfig({ PUBLIC_BASE_URL: 'https://mcp.example.com', DATABASE_URL: connectionString!,
+      CONFIG_ENCRYPTION_KEY: encryptionKey, OLLAMA_BASE_URL: 'http://unused', OLLAMA_EMBEDDING_MODEL: 'test' });
+    const semantic = new SemanticMemoryService(database, () => config);
+    const owner = await semantic.repository.ensureUser(`embedding-race-${outcome}`);
+    const memory = await semantic.repository.remember(owner.userId, { spaceId: owner.personalSpaceId, type: 'fact', content: 'before' });
+    let started!: () => void;
+    const entered = new Promise<void>(resolve => { started = resolve; });
+    let finish!: (response: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(() => { started(); return new Promise<Response>(resolve => { finish = resolve; }); }));
+    const pending = semantic.rebuildEmbedding(owner.userId, memory.id);
+    await entered;
+    await semantic.repository.update(owner.userId, memory.id, { content: 'after' }, 'integration update');
+    finish(outcome === 'success' ? Response.json({ embeddings: [[1,0]] }) : new Response('failed', { status: 500 }));
+    expect((await pending).status).toBe('superseded');
+    expect((await database.query('SELECT 1 FROM memory_embeddings WHERE memory_id=$1', [memory.id])).rows).toHaveLength(0);
   });
 
   it('blocks cross-tenant memory, job, Agent and export access', async () => {

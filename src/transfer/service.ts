@@ -1,9 +1,10 @@
 import { z } from 'zod/v4';
 import type { Database } from '../database.js';
-import { requireSpaceRole } from '../memory/permissions.js';
+import { requireAgentSpaceScope, requireSpaceRole } from '../memory/permissions.js';
 import type { MemoryType } from '../memory/types.js';
 import type { SemanticMemoryService } from '../semantic/service.js';
 import type { MemoryGovernanceService } from '../governance/service.js';
+import { operationSignal } from '../operations.js';
 
 const importMemorySchema = z.object({
   type: z.enum(['fact','preference','event','task','person','project','summary','document','idea','other']).default('other'),
@@ -40,6 +41,8 @@ export class MemoryTransferService {
   }
 
   async import(userId: string, spaceId: string, format: 'json'|'markdown', content: string, sourceAgent?: string) {
+    const signal = operationSignal();
+    signal?.throwIfAborted();
     await requireSpaceRole(this.database, userId, spaceId, 'contributor');
     const records = format === 'json' ? parseJson(content) : parseMarkdown(content);
     if (records.length > 500) throw new Error('A single import is limited to 500 memories.');
@@ -47,31 +50,39 @@ export class MemoryTransferService {
       `INSERT INTO ingestion_jobs(space_id,requested_by,source_type,status,progress) VALUES($1,$2,$3,'processing',$4) RETURNING id`,
       [spaceId, userId, `import_${format}`, { total: records.length, completed: 0, failed: 0, errors: [] }]);
     const errors: Array<{ index: number; message: string }> = [];
+    const warnings: Array<{ index: number; status: string; reason?: string }> = [];
     let completed = 0;
     for (let index = 0; index < records.length; index += 1) {
+      if (signal?.aborted) break;
       try {
         const record = importMemorySchema.parse(records[index]);
         const memory = await this.semantic.remember(userId, { spaceId, type: record.type as MemoryType, content: record.content,
           summary: record.summary, tags: record.tags, importance: record.importance, confidence: record.confidence,
           sensitivity: record.sensitivity, validFrom: record.validFrom, validUntil: record.validUntil, expiresAt: record.expiresAt,
           source: { type: `import_${format}`, agent: sourceAgent } });
-        await this.governance.detect(userId, memory.id);
         completed += 1;
-      } catch (error) { errors.push({ index, message: error instanceof Error ? error.message : 'Import failed.' }); }
+        signal?.throwIfAborted();
+        const governance = await this.governance.detectAfterWrite(userId, memory.id);
+        if (governance.status !== 'completed') warnings.push({ index, ...governance });
+      } catch (error) {
+        if (signal?.aborted) break;
+        errors.push({ index, message: error instanceof Error ? error.message : 'Import failed.' });
+      }
     }
-    const status = errors.length === records.length && records.length > 0 ? 'failed' : 'completed';
-    const progress = { total: records.length, completed, failed: errors.length, errors: errors.slice(0, 100) };
+    const status = signal?.aborted ? 'cancelled' : errors.length === records.length && records.length > 0 ? 'failed' : 'completed';
+    const progress = { total: records.length, completed, failed: errors.length, errors: errors.slice(0, 100), warnings: warnings.slice(0, 100) };
     await this.database.query('UPDATE ingestion_jobs SET status=$2,progress=$3,error=$4,updated_at=now() WHERE id=$1',
       [job.rows[0].id, status, progress, errors.length ? `${errors.length} record(s) failed.` : null]);
     return { jobId: job.rows[0].id, status, ...progress };
   }
 
-  async status(userId: string, jobId: string) {
+  async status(userId: string, jobId: string, agentId?: string) {
     const result = await this.database.query(
       `SELECT ij.id,ij.space_id,ij.source_type,ij.status,ij.progress,ij.error,ij.created_at,ij.updated_at
        FROM ingestion_jobs ij JOIN space_members sm ON sm.space_id=ij.space_id
        WHERE ij.id=$1 AND sm.user_id=$2`, [jobId, userId]);
     if (!result.rows[0]) throw new Error('Import job not found or access denied.');
+    await requireAgentSpaceScope(this.database, agentId, result.rows[0].space_id, 'memory:read');
     return result.rows[0];
   }
 }

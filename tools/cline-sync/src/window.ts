@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { dataDir } from './config.js';
+import { stopChild } from './lifecycle.js';
 
 /**
  * Opens the config panel as a chromeless desktop window using the browser engine
@@ -62,23 +63,66 @@ export function appWindowArgs(url: string, profileDir: string, size = { width: 7
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-features=Translate,MediaRouter',
-    '--disable-background-networking'
+    '--disable-background-networking',
+    '--disable-background-mode'
   ];
 }
 
 export function openPanelWindow(url: string, options: {
-  engine?: string; profileDir?: string; spawnImpl?: typeof spawn;
+  engine?: string; profileDir?: string; spawnImpl?: typeof spawn; onError?: (error: Error) => void;
 } = {}): WindowHandle {
   const engine = options.engine ?? findEngine();
   const launch = options.spawnImpl ?? spawn;
   const profileDir = options.profileDir ?? join(dataDir(), 'panel-profile');
   if (engine) {
     const child = launch(engine, appWindowArgs(url, profileDir), { detached: true, stdio: 'ignore' });
+    child.once('error', options.onError ?? (() => undefined));
     child.unref();
     return { process: child, mode: 'app-window', engine };
   }
   const command = process.platform === 'win32' ? 'cmd' : process.platform === 'darwin' ? 'open' : 'xdg-open';
   const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url];
-  launch(command, args, { detached: true, stdio: 'ignore' }).unref();
+
+  const child = launch(command, args, { detached: true, stdio: 'ignore' });
+  child.once('error', options.onError ?? (() => undefined));
+  child.unref();
   return { mode: 'default-browser' };
+}
+
+/** Repeated tray clicks reuse the owned window rather than spawning more browsers. */
+export class PanelWindow {
+  private handle?: WindowHandle;
+  private closed = false;
+  private closing?: Promise<void>;
+
+  constructor(private readonly options: Parameters<typeof openPanelWindow>[1] = {},
+    private readonly stop = stopChild) {}
+
+  open(url: string): WindowHandle | undefined {
+    if (this.closed) return undefined;
+    if (this.handle) return this.handle;
+    const handle = openPanelWindow(url, this.options);
+    if (handle.process) {
+      this.handle = handle;
+      const release = () => {
+        if (this.handle === handle) this.handle = undefined;
+        handle.process!.removeListener('exit', release);
+        handle.process!.removeListener('error', release);
+      };
+      handle.process.once('exit', release);
+      handle.process.once('error', release);
+    }
+    // Default browser is user-owned: do not retain or terminate it.
+    return handle;
+  }
+
+  close(): Promise<void> {
+    if (!this.closing) {
+      this.closed = true;
+      const child = this.handle?.process;
+      this.handle = undefined;
+      this.closing = child ? this.stop(child, true) : Promise.resolve();
+    }
+    return this.closing;
+  }
 }

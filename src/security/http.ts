@@ -3,6 +3,14 @@ import { getConnInfo } from '@hono/node-server/conninfo';
 
 interface Bucket { count: number; resetAt: number; }
 
+export function attachmentHeader(filename: string): string {
+  const safe = Buffer.from(filename.replace(/[\r\n]/g, ''), 'utf8').toString('utf8');
+  const fallback = safe.replace(/[^A-Za-z0-9._-]/g, '_') || 'export';
+  const encoded = encodeURIComponent(safe).replace(/['()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+
+
 export function securityHeaders() {
   return async (context: Context, next: Next) => {
     await next();

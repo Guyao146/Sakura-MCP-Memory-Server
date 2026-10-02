@@ -56,6 +56,7 @@ sed -i \
 
 chmod 600 .env
 mkdir -p data
+# Compose prepare-data assigns the bind mount to the fixed application UID 10001.
 chmod 700 data
 
 echo "正在拉取并启动 PostgreSQL + Sakura-MCP-Server……"

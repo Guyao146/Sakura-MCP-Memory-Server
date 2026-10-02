@@ -7,7 +7,9 @@ const { Pool } = pg;
 export class Database {
   readonly pool: pg.Pool;
   constructor(connectionString: string, maxConnections: number) {
-    this.pool = new Pool({ connectionString, max: maxConnections, statement_timeout: 15_000, application_name: 'Sakura-MCP-Server' });
+    this.pool = new Pool({ connectionString, max: maxConnections, statement_timeout: 15_000,
+      connectionTimeoutMillis: 5000, idleTimeoutMillis: 30_000, idle_in_transaction_session_timeout: 15_000,
+      application_name: 'Sakura-MCP-Server' });
   }
   query<T extends pg.QueryResultRow = pg.QueryResultRow>(text: string, values: unknown[] = []): Promise<pg.QueryResult<T>> {
     return this.pool.query<T>(text, values);
@@ -44,5 +46,6 @@ export class Database {
     }
     throw lastError instanceof Error ? new Error(`Database was not ready after ${attempts} attempts: ${lastError.message}`, { cause: lastError }) : lastError;
   }
-  close(): Promise<void> { return this.pool.end(); }
+  private closing?: Promise<void>;
+  close(): Promise<void> { return this.closing ??= this.pool.end(); }
 }

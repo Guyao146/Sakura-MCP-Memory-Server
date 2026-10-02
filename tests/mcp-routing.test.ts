@@ -45,6 +45,18 @@ describe('deferred MCP stream cleanup', () => {
     expect(cleanup).toHaveBeenCalledTimes(1);
   });
 
+  it('cleans an unread stalled stream on abort and releases the source lock', async () => {
+    const controller = new AbortController(); const cleanup = vi.fn(async () => undefined);
+    const cancelled = vi.fn();
+    const source = new Response(new ReadableStream({ cancel: cancelled }));
+    const wrapped = streamWithDeferredCleanup(source, cleanup, controller.signal);
+    controller.abort(new Error('cancelled'));
+    await expect(wrapped.text()).rejects.toThrow('cancelled');
+    await vi.waitFor(() => expect(source.body!.locked).toBe(false));
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(cancelled).toHaveBeenCalledTimes(1);
+  });
+
   it('runs cleanup immediately for a body-less response', async () => {
     const cleanup = vi.fn(async () => undefined);
     const wrapped = streamWithDeferredCleanup(new Response(null, { status: 202 }), cleanup);

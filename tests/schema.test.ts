@@ -58,6 +58,43 @@ describe('memory database schema', () => {
     expect(source).not.toContain("'file://");
   });
 
+  it('gives the app a signal-forwarding init and enough shutdown grace', async () => {
+    const [compose, dockerfile, entrypoint] = await Promise.all([
+      readFile(new URL('../docker-compose.yml', import.meta.url), 'utf8'),
+      readFile(new URL('../Dockerfile', import.meta.url), 'utf8'),
+      readFile(new URL('../scripts/container-entrypoint.sh', import.meta.url), 'utf8')
+    ]);
+    expect(compose).toContain('init: true');
+    expect(compose).toContain('stop_signal: SIGTERM');
+    expect(compose).toContain('stop_grace_period: 30s');
+    expect(dockerfile).toContain('STOPSIGNAL SIGTERM');
+    expect(entrypoint).toContain('exec node /app/dist/index.js');
+  });
+
+  it('keeps data mount ownership aligned with the unprivileged image user', async () => {
+    const [compose, dockerfile] = await Promise.all([
+      readFile(new URL('../docker-compose.yml', import.meta.url), 'utf8'),
+      readFile(new URL('../Dockerfile', import.meta.url), 'utf8')
+    ]);
+    expect(dockerfile).toContain('--uid 10001 --gid mcp');
+    expect(dockerfile).toContain('--gid 10001 mcp');
+    expect(dockerfile).toContain('USER mcp');
+    expect(compose).toContain('prepare-data:');
+    expect(compose).toContain('find /data -type d -exec chown 10001:10001 {} + -exec chmod 700 {} +');
+    expect(compose).toContain('find /data -type f -exec chown 10001:10001 {} + -exec chmod 600 {} +');
+    expect(compose).toMatch(/prepare-data:\s+condition: service_completed_successfully/);
+  });
+
+  it('invalidates embeddings transactionally for content, summary, and tag changes', async () => {
+    const sql = await readFile(new URL('../migrations/012_embedding_consistency.sql', import.meta.url), 'utf8');
+    expect(sql).toContain('embedding_revision bigint NOT NULL DEFAULT 0');
+    expect(sql).toContain('ADD COLUMN request_id uuid');
+    expect(sql).toContain('(NEW.content,NEW.summary,NEW.tags) IS DISTINCT FROM (OLD.content,OLD.summary,OLD.tags)');
+    expect(sql).toContain('BEFORE UPDATE ON memories');
+    expect(sql).toContain('AFTER UPDATE ON memories');
+    expect(sql).toContain('DELETE FROM memory_embeddings WHERE memory_id=NEW.id');
+  });
+
   it('defines a recoverable PostgreSQL background queue', async () => {
     const sql = await readFile(new URL('../migrations/006_background_jobs.sql', import.meta.url), 'utf8');
     expect(sql).toContain('locked_by text');
@@ -139,9 +176,10 @@ describe('memory database schema', () => {
     const source = await readFile(new URL('../src/web/session.ts', import.meta.url), 'utf8');
     // The purpose belongs in the WHERE clause: a code minted for a probe must be
     // unredeemable by the login path even if later refactors drop a branch.
-    expect(source).toContain('WHERE state_hash=$1 AND purpose=$2 AND expires_at>now()');
-    expect(source).toContain("consumeAttempt(state, 'login')");
-    expect(source).toContain("consumeAttempt(state, 'probe')");
+    expect(source).toContain('WHERE state_hash=$1 AND ($2::text IS NULL OR purpose=$2) AND expires_at>now()');
+    expect(source).toContain('AND browser_binding_hash=$3');
+    expect(source).toContain("consumeAttempt(state, 'login', cookieHeader)");
+    expect(source).toContain("consumeAttempt(state, 'probe', cookieHeader)");
     // The probe must ask Authentik to stay silent rather than render its login form.
     expect(source).toContain("if (purpose === 'probe') url.searchParams.set('prompt', 'none')");
   });

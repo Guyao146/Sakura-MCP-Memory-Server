@@ -63,6 +63,17 @@ services:
       timeout: 5s
       retries: 10
 
+  prepare-data:
+    image: alpine:3.22
+    restart: "no"
+    volumes:
+      - ./data:/data
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        find /data -type d -exec chown 10001:10001 {} + -exec chmod 700 {} +
+        find /data -type f -exec chown 10001:10001 {} + -exec chmod 600 {} +
+
   sakura-mcp:
     image: ${SAKURA_MCP_IMAGE:-ghcr.io/guyao146/sakura-mcp-server:0.3.4}
     container_name: sakura-mcp-server-app
@@ -82,6 +93,7 @@ services:
       AUTHENTIK_AUDIENCE: ${AUTHENTIK_AUDIENCE:-}
       AUTHENTIK_JWKS_URI: ${AUTHENTIK_JWKS_URI:-}
       AUTHENTIK_SCOPE_CLAIM: ${AUTHENTIK_SCOPE_CLAIM:-scope}
+      OPENAI_COMPATIBLE_API_KEY: ${OPENAI_COMPATIBLE_API_KEY:-}
       OPENAI_COMPATIBLE_BASE_URL: ${OPENAI_COMPATIBLE_BASE_URL:-}
       OPENAI_COMPATIBLE_CHAT_MODEL: ${OPENAI_COMPATIBLE_CHAT_MODEL:-}
       OPENAI_COMPATIBLE_EMBEDDING_MODEL: ${OPENAI_COMPATIBLE_EMBEDDING_MODEL:-}
@@ -105,6 +117,8 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      prepare-data:
+        condition: service_completed_successfully
     networks:
       default:
         aliases:
@@ -121,6 +135,8 @@ services:
     cap_drop:
       - ALL
     pids_limit: 256
+    init: true
+    stop_signal: SIGTERM
     stop_grace_period: 30s
     read_only: true
     tmpfs:

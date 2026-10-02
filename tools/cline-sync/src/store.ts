@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { dataDir, normalizeConfig, type SyncConfig } from './config.js';
 
@@ -9,7 +10,7 @@ import { dataDir, normalizeConfig, type SyncConfig } from './config.js';
  * avoiding duplicate memories.
  */
 
-export type Cursors = Record<string, { messageCount: number; syncedAt: string }>;
+export type Cursors = Record<string, { messageCount: number; syncedAt: string; messageOffset?: number; messageHash?: string }>;
 
 function configPath(dir = dataDir()): string { return join(dir, 'config.json'); }
 function cursorsPath(dir = dataDir()): string { return join(dir, 'cursors.json'); }
@@ -37,5 +38,10 @@ export async function loadCursors(dir = dataDir()): Promise<Cursors> {
 
 export async function saveCursors(cursors: Cursors, dir = dataDir()): Promise<void> {
   await mkdir(dir, { recursive: true });
-  await writeFile(cursorsPath(dir), JSON.stringify(cursors, null, 2), { mode: 0o600 });
+  const target = cursorsPath(dir);
+  const temporary = `${target}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, JSON.stringify(cursors, null, 2), { mode: 0o600 });
+    await rename(temporary, target);
+  } finally { await rm(temporary, { force: true }); }
 }

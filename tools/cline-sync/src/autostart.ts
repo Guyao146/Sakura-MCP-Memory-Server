@@ -46,7 +46,8 @@ function linuxDesktopPath(options: AutostartOptions): string {
 
 /** Runs `reg.exe` and collects its output; returns the exit code. */
 function reg(args: string[], spawnImpl: typeof spawn): Promise<{ code: number | null; stdout: string }> {
-  const child = spawnImpl('reg', args, { windowsHide: true });
+  const child = spawnImpl('reg', args, { windowsHide: true, timeout: 5000, killSignal: 'SIGKILL',
+    stdio: ['ignore', 'pipe', 'ignore'] });
   let stdout = '';
   child.stdout?.on('data', chunk => { stdout += chunk.toString(); });
   return new Promise(resolve => {

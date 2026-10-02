@@ -14,7 +14,8 @@ import { SyncScheduler } from './scheduler.js';
 import { listTaskInventory } from './sync.js';
 import { loadHistory } from './history.js';
 import { ConfigPanel } from './gui.js';
-import { openPanelWindow } from './window.js';
+import { PanelWindow } from './window.js';
+import { Lifecycle, stopChild } from './lifecycle.js';
 import { resolveSysTray } from './systray-interop.js';
 import { prepareTrayBinary, isPackaged } from './tray-binary.js';
 import { trayIconIco, trayIconPng } from './tray-icon.js';
@@ -26,54 +27,68 @@ async function main(): Promise<void> {
   let config = await loadConfig();
   const scheduler = new SyncScheduler(config, log, { history: await loadHistory() });
 
+  const lifecycle = new Lifecycle(error => log(`资源回收失败：${String(error)}`));
+  const window = new PanelWindow({ onError: error => log(`配置窗口启动失败：${error.message}`) });
+  lifecycle.add(() => scheduler.close());
+  lifecycle.add(() => window.close());
+  const setConfig = async (next: SyncConfig) => {
+    await saveConfig(next);
+    if (lifecycle.stopping) return;
+    config = next;
+    scheduler.updateConfig(config);
+    log('配置已更新');
+  };
+  const showPanel = (url: string) => {
+    const handle = window.open(url);
+    if (handle) log(handle.mode === 'app-window' ? '配置窗口已打开（已存在时复用）' : '已用默认浏览器打开配置面板');
+  };
   const panel = new ConfigPanel({
     getConfig: () => config,
-    setConfig: async next => {
-      config = next;
-      await saveConfig(config);
-      scheduler.updateConfig(config);
-      log('配置已更新');
-    },
+    setConfig,
     getStatus: () => scheduler.status(),
     syncNow: async () => { void scheduler.runOnce(); },
-    testConnection: cfg => scheduler.testConnection(cfg),
-    listTasks: () => listTaskInventory(config),
+    testConnection: (cfg, signal) => scheduler.testConnection(cfg, signal),
+    listTasks: signal => listTaskInventory(config, { signal }),
     resumeSync: () => scheduler.resume()
   });
-
-  const url = await panel.start();
-  log(`配置面板：${url}`);
-  log(`数据目录：${dataDir()}`);
-  scheduler.start();
-  const unconfigured = !config.mcpUrl || !config.token;
-  if (unconfigured) log('尚未配置 MCP 地址与 Agent 密钥，请在配置窗口中填写。');
-
-  await startTray(url, scheduler, () => config, async () => {
-    scheduler.stop();
-    await panel.stop();
+  lifecycle.add(() => panel.stop());
+  const shutdown = () => {
+    if (lifecycle.stopping) return;
+    const deadline = setTimeout(() => process.exit(1), 5000);
+    deadline.unref();
+    void lifecycle.close().finally(() => clearTimeout(deadline));
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
+  lifecycle.add(() => {
+    process.removeListener('SIGINT', shutdown);
+    process.removeListener('SIGTERM', shutdown);
   });
-
-  // A fresh install has nothing to sync yet, so show the window immediately
-  // instead of leaving the user to hunt for the tray icon.
-  if (unconfigured) showPanel(url);
-}
-
-/** Opens the panel as a chromeless app window, falling back to the default browser. */
-function showPanel(url: string): void {
-  const handle = openPanelWindow(url);
-  log(handle.mode === 'app-window' ? '已打开配置窗口' : '未找到可用浏览器引擎，已用默认浏览器打开配置面板');
+  try {
+    const url = await panel.start();
+    if (lifecycle.stopping) return;
+    log(`配置面板：${url}`);
+    log(`数据目录：${dataDir()}`);
+    scheduler.start();
+    await startTray(url, scheduler, () => config, setConfig, showPanel, lifecycle, shutdown);
+    if (!lifecycle.stopping && (!config.mcpUrl || !config.token)) showPanel(url);
+  } catch (error) {
+    await lifecycle.close();
+    throw error;
+  }
 }
 
 async function startTray(url: string, scheduler: SyncScheduler, getConfig: () => SyncConfig,
-  shutdown: () => Promise<void>): Promise<void> {
+  setConfig: (config: SyncConfig) => Promise<void>, showPanel: (url: string) => void,
+  lifecycle: Lifecycle, shutdown: () => void): Promise<void> {
   // In a packaged build the bundled tray helper lives in the read-only snapshot,
   // so copy it out and run from there before systray2 looks for it.
+  // The loopback HTTP server keeps console mode alive; no dummy interval needed.
   try {
     const trayCwd = await prepareTrayBinary();
     if (trayCwd) { process.chdir(trayCwd); log(`托盘辅助程序目录：${trayCwd}`); }
   } catch (error) {
     log(`托盘辅助程序准备失败，继续以控制台模式运行：${error instanceof Error ? error.message : error}`);
-    keepAlive();
     return;
   }
 
@@ -83,14 +98,13 @@ async function startTray(url: string, scheduler: SyncScheduler, getConfig: () =>
   }
   catch (error) {
     log(`托盘不可用，继续以控制台模式运行：${error instanceof Error ? error.message : error}`);
-    keepAlive();
     return;
   }
 
   const openItem = { title: '打开配置窗口', tooltip: '在独立窗口中编辑同步设置', enabled: true, checked: false };
   const syncItem = { title: '立即同步', tooltip: '马上扫描一次 Cline 任务历史', enabled: true, checked: false };
   const statusItem = { title: '状态：就绪', tooltip: '最近一次同步结果', enabled: false, checked: false };
-  const toggleItem = { title: '暂停自动同步', tooltip: '临时停止定时扫描', enabled: true, checked: getConfig().enabled };
+  const toggleItem = { title: getConfig().enabled ? '暂停自动同步' : '恢复自动同步', tooltip: '停止在途同步及定时扫描', enabled: true, checked: getConfig().enabled };
   // Only a packaged build has a stable entry point worth registering at login.
   const autostartItem = { title: '开机自启', tooltip: '登录时自动启动本程序', enabled: isPackaged(), checked: false };
   const exitItem = { title: '退出', tooltip: '结束后台同步', enabled: true, checked: false };
@@ -99,6 +113,7 @@ async function startTray(url: string, scheduler: SyncScheduler, getConfig: () =>
     log(`开机自启：${autostartItem.checked ? '已开启（' + autostartLocation() + '）' : '未开启'}`);
   }
 
+  if (lifecycle.stopping) return;
   let tray: import('systray2').default;
   try {
     tray = new SysTray({
@@ -114,64 +129,103 @@ async function startTray(url: string, scheduler: SyncScheduler, getConfig: () =>
     });
   } catch (error) {
     log(`托盘初始化失败，继续以控制台模式运行：${error instanceof Error ? error.message : error}`);
-    keepAlive();
     return;
   }
 
-  tray.onClick(action => {
+  const disposeTray = async () => {
+    if (tray.process) await stopChild(tray.process);
+  };
+  lifecycle.add(disposeTray);
+  let readyTimer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      tray.ready(),
+      new Promise<never>((_, reject) => {
+        readyTimer = setTimeout(() => reject(new Error('托盘启动超时')), 5000);
+      })
+    ]);
+  } catch (error) {
+    log(`托盘不可用，继续以控制台模式运行：${String(error)}`);
+    await disposeTray();
+    // If initialization finishes late, do not leave its helper running.
+    void tray.ready().then(disposeTray, () => undefined);
+    return;
+  } finally {
+    clearTimeout(readyTimer);
+  }
+  if (lifecycle.stopping) { await disposeTray(); return; }
+
+  const send = (action: Parameters<typeof tray.sendAction>[0]) => {
+    if (!lifecycle.stopping && tray.process.exitCode === null && !tray.process.killed) {
+      void tray.sendAction(action).catch(error => log(`托盘更新失败：${String(error)}`));
+    }
+  };
+  let changingConfig = false;
+  let changingAutostart = false;
+  await tray.onClick(action => {
+    if (lifecycle.stopping) return;
     const title = action.item?.title;
     if (title === openItem.title) { showPanel(url); return; }
     if (title === syncItem.title) { void scheduler.runOnce(); return; }
     if (title === toggleItem.title) {
+      if (changingConfig) return;
+      changingConfig = true;
       const enabled = !getConfig().enabled;
       void (async () => {
-        const next = { ...getConfig(), enabled };
-        await saveConfig(next);
-        scheduler.updateConfig(next);
+        await setConfig({ ...getConfig(), enabled });
+        if (enabled && scheduler.status().halted) scheduler.resume();
         toggleItem.checked = enabled;
         toggleItem.title = enabled ? '暂停自动同步' : '恢复自动同步';
-        tray.sendAction({ type: 'update-item', item: toggleItem, seq_id: action.seq_id });
-      })();
+        send({ type: 'update-item', item: toggleItem, seq_id: action.seq_id });
+      })().catch(error => log(`配置更新失败：${String(error)}`)).finally(() => { changingConfig = false; });
       return;
     }
     if (title === autostartItem.title) {
+      if (changingAutostart || !autostartItem.enabled) return;
+      changingAutostart = true;
       void (async () => {
         try {
           if (autostartItem.checked) await disableAutostart();
           else await enableAutostart();
           autostartItem.checked = !autostartItem.checked;
-          tray.sendAction({ type: 'update-item', item: autostartItem, seq_id: action.seq_id });
+          send({ type: 'update-item', item: autostartItem, seq_id: action.seq_id });
           log(autostartItem.checked ? `已开启开机自启（${autostartLocation()}）` : '已关闭开机自启');
         } catch (error) {
           log(`开机自启设置失败：${error instanceof Error ? error.message : error}`);
+        } finally {
+          changingAutostart = false;
         }
       })();
       return;
     }
     if (title === exitItem.title) {
-      void shutdown().finally(() => { tray.kill(false); process.exit(0); });
+      shutdown();
     }
   });
 
+  // No later tray resources should be installed if shutdown won the await above.
+  if (lifecycle.stopping) return;
   // Reflect the latest run in the (disabled) status row so hovering the tray is enough.
   const refresh = setInterval(() => {
     const status = scheduler.status();
+    if (toggleItem.checked !== getConfig().enabled) {
+      toggleItem.checked = getConfig().enabled;
+      toggleItem.title = toggleItem.checked ? '暂停自动同步' : '恢复自动同步';
+      send({ type: 'update-item', item: toggleItem });
+    }
     const next = `状态：${status.running ? '同步中' : status.lastResult ?? '就绪'}`;
     if (next === statusItem.title) return;
     statusItem.title = next;
-    tray.sendAction({ type: 'update-item', item: statusItem });
+    send({ type: 'update-item', item: statusItem });
   }, 5000);
-  refresh.unref?.();
-
-  await tray.ready().then(() => log('托盘已启动')).catch((error: unknown) => {
-    log(`托盘启动失败，继续以控制台模式运行：${error instanceof Error ? error.message : error}`);
-    keepAlive();
+  refresh.unref();
+  const clearRefresh = () => clearInterval(refresh);
+  tray.process.once('exit', clearRefresh);
+  lifecycle.add(() => {
+    clearRefresh();
+    tray.process.removeListener('exit', clearRefresh);
   });
-}
-
-/** Prevents the process from exiting when no tray holds the event loop. */
-function keepAlive(): void {
-  setInterval(() => undefined, 1 << 30);
+  log('托盘已启动');
 }
 
 void main().catch(error => {

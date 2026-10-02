@@ -19,6 +19,18 @@ export class MemoryGovernanceService {
     return result.rows;
   }
 
+  /** Optional post-write governance must never turn a committed write into a failure. */
+  async detectAfterWrite(userId: string, memoryId: string) {
+    try {
+      const memory = await this.memories.get(userId, memoryId);
+      const role = await requireSpaceRole(this.database, userId, memory.space_id, 'contributor');
+      if (role === 'contributor') return { status: 'skipped' as const, reason: 'editor_required' };
+      return { status: 'completed' as const, ...await this.detect(userId, memoryId) };
+    } catch {
+      return { status: 'deferred' as const, reason: 'Post-write governance was not completed; the memory is stored.' };
+    }
+  }
+
   async detect(userId: string, memoryId: string) {
     const memory = await this.memories.get(userId, memoryId);
     await requireSpaceRole(this.database, userId, memory.space_id, 'editor');
@@ -72,7 +84,7 @@ export class MemoryGovernanceService {
            VALUES($1,$2,$3,'superseded_by',1,$4) ON CONFLICT DO NOTHING`, [conflict.space_id, loser, winner, userId]);
       } else if (resolution === 'merge') {
         if (!merged?.content) throw new Error('Merged content is required.');
-        const current = await client.query<MemoryRecord>('SELECT * FROM memories WHERE id=$1', [conflict.memory_a_id]);
+        const current = await client.query<MemoryRecord>('SELECT * FROM memories WHERE id=$1 FOR UPDATE', [conflict.memory_a_id]);
         const version = await client.query<{ next: number }>('SELECT coalesce(max(version),0)+1 AS next FROM memory_versions WHERE memory_id=$1', [conflict.memory_a_id]);
         const updated = await client.query<MemoryRecord>(
           `UPDATE memories SET content=$2,summary=$3,tags=$4,updated_at=now() WHERE id=$1 RETURNING *`,

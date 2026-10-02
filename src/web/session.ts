@@ -41,6 +41,17 @@ const PROBE_HINT_COOKIE = 'sakura_login_hint';
 const PROBE_HINT_MAX_AGE = 120;
 
 
+export function safeReturnPath(value: string, baseUrl: string, fallback = '/admin'): string {
+  if (!value.startsWith('/') || /[\\\\\u0000-\u0020\u007f]/.test(value)) return fallback;
+  try {
+    const target = new URL(value, baseUrl);
+    if (target.origin !== new URL(baseUrl).origin) return fallback;
+    const path = target.pathname + target.search + target.hash;
+    return path.startsWith('//') ? fallback : path;
+  } catch { return fallback; }
+}
+
+
 export class WebSessionService {
   private localIdentityPromise?: Promise<WebIdentity>;
   constructor(private readonly database: Database, private readonly getConfig: () => AppConfig) {}
@@ -56,14 +67,15 @@ export class WebSessionService {
 
   async begin(returnTo = '/admin', purpose: LoginPurpose = 'login') {
     const auth = this.requireConfig();
-    const safeReturnTo = /^\/(?!\/)/.test(returnTo) ? returnTo : '/admin';
+    const safeReturnTo = safeReturnPath(returnTo, this.getConfig().publicBaseUrl);
+    const binding = base64url(randomBytes(32));
     const state = base64url(randomBytes(32));
     const verifier = base64url(randomBytes(48));
     const nonce = base64url(randomBytes(24));
     const challenge = base64url(createHash('sha256').update(verifier).digest());
     await this.database.query(
-      `INSERT INTO oidc_login_attempts(state_hash,code_verifier,nonce,return_to,purpose,expires_at)
-       VALUES($1,$2,$3,$4,$5,now()+interval '10 minutes')`, [hash(state), verifier, nonce, safeReturnTo, purpose]);
+      `INSERT INTO oidc_login_attempts(state_hash,code_verifier,nonce,return_to,purpose,browser_binding_hash,expires_at)
+       VALUES($1,$2,$3,$4,$5,$6,now()+interval '10 minutes')`, [hash(state), verifier, nonce, safeReturnTo, purpose, hash(binding)]);
     await this.database.query('DELETE FROM oidc_login_attempts WHERE expires_at<=now()');
     const url = new URL(auth.authorizationUrl!);
     url.searchParams.set('client_id', auth.clientId!);
@@ -77,7 +89,17 @@ export class WebSessionService {
     // A probe must never show UI: Authentik answers with `login_required` instead
     // of rendering its own login form when no SSO session exists.
     if (purpose === 'probe') url.searchParams.set('prompt', 'none');
-    return url.toString();
+    return { url: url.toString(), cookie: this.loginCookie(state, binding, 600) };
+  }
+
+  private loginCookie(state: string, value: string, maxAge: number): string {
+    return `sakura_oidc_${hash(state)}=${value}; Path=/auth; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${this.secureFlag()}`;
+  }
+
+  clearLoginCookie(state: string): string { return this.loginCookie(state, '', 0); }
+
+  async failedCallback(state: string, cookieHeader?: string): Promise<LoginPurpose> {
+    return (await this.consumeAttempt(state, undefined, cookieHeader)).purpose;
   }
 
   /**
@@ -88,8 +110,8 @@ export class WebSessionService {
    * The verified ID Token is discarded: no user row is touched and no session is
    * created. The result is only used to render the login page.
    */
-  async probeCallback(code: string, state: string): Promise<ProbedIdentity> {
-    const attempt = await this.consumeAttempt(state, 'probe');
+  async probeCallback(code: string, state: string, cookieHeader?: string): Promise<ProbedIdentity> {
+    const attempt = await this.consumeAttempt(state, 'probe', cookieHeader);
     const payload = await this.verifyIdToken(code, attempt);
     const displayName = typeof payload.name === 'string' ? payload.name
       : typeof payload.preferred_username === 'string' ? payload.preferred_username
@@ -125,8 +147,8 @@ export class WebSessionService {
   }
 
 
-  async callback(code: string, state: string): Promise<{ token: string; returnTo: string }> {
-    const attempt = await this.consumeAttempt(state, 'login');
+  async callback(code: string, state: string, cookieHeader?: string): Promise<{ token: string; returnTo: string }> {
+    const attempt = await this.consumeAttempt(state, 'login', cookieHeader);
     const payload = await this.verifyIdToken(code, attempt);
     const auth = this.requireConfig();
     if (!payload.sub) throw new Error('OIDC ID Token is missing subject.');
@@ -149,13 +171,18 @@ export class WebSessionService {
    * probe transaction can never be redeemed by the login path and vice versa. The
    * row is deleted on read, making every authorization code single-use.
    */
-  private async consumeAttempt(state: string, purpose: LoginPurpose): Promise<LoginAttempt> {
+  private async consumeAttempt(state: string, purpose?: LoginPurpose, cookieHeader?: string): Promise<LoginAttempt> {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(state)) throw new Error('OIDC login state is invalid or expired.');
+    const prefix = `sakura_oidc_${hash(state)}=`;
+    const binding = cookieHeader?.split(';').map(item => item.trim()).find(item => item.startsWith(prefix))?.slice(prefix.length);
+    if (!binding || !/^[A-Za-z0-9_-]{43}$/.test(binding)) throw new Error('OIDC browser binding is missing or invalid.');
     const client = await this.database.pool.connect();
     try {
       await client.query('BEGIN');
       const result = await client.query<LoginAttempt>(
-        `DELETE FROM oidc_login_attempts WHERE state_hash=$1 AND purpose=$2 AND expires_at>now()
-         RETURNING code_verifier,nonce,return_to,purpose`, [hash(state), purpose]);
+        `DELETE FROM oidc_login_attempts WHERE state_hash=$1 AND ($2::text IS NULL OR purpose=$2) AND expires_at>now()
+         AND browser_binding_hash=$3
+         RETURNING code_verifier,nonce,return_to,purpose`, [hash(state), purpose ?? null, hash(binding)]);
       const attempt = result.rows[0];
       if (!attempt) throw new Error('OIDC login state is invalid or expired.');
       await client.query('COMMIT');
@@ -214,7 +241,7 @@ export class WebSessionService {
     if (!auth?.clientId) return undefined;
     const candidate = auth.endSessionUrl || (auth.issuer ? `${auth.issuer.replace(/\/$/, '')}/end-session/` : '');
     if (!candidate) return undefined;
-    const safeReturnTo = /^\/(?!\/)/.test(returnTo) ? returnTo : '/auth/login';
+    const safeReturnTo = safeReturnPath(returnTo, this.getConfig().publicBaseUrl, '/auth/login');
     let url: URL;
     try { url = new URL(candidate); }
     catch { return undefined; }

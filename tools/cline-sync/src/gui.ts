@@ -16,8 +16,8 @@ export interface PanelHooks {
   setConfig: (config: SyncConfig) => Promise<void>;
   getStatus: () => PanelStatus;
   syncNow: () => Promise<void>;
-  testConnection: (config: SyncConfig) => Promise<{ ok: boolean; error?: string }>;
-  listTasks: () => Promise<TaskInventoryItem[]>;
+  testConnection: (config: SyncConfig, signal?: AbortSignal) => Promise<{ ok: boolean; error?: string }>;
+  listTasks: (signal?: AbortSignal) => Promise<TaskInventoryItem[]>;
   resumeSync: () => void;
 }
 
@@ -37,27 +37,48 @@ export class ConfigPanel {
   private server?: Server;
   readonly token = randomBytes(16).toString('hex');
   private port = 0;
+  private starting?: Promise<string>;
+  private closing?: Promise<void>;
+  private readonly requests = new Set<AbortController>();
+  private readonly busy = new Set<string>();
 
   constructor(private readonly hooks: PanelHooks) {}
 
   get url(): string { return `http://127.0.0.1:${this.port}/?token=${this.token}`; }
 
-  async start(): Promise<string> {
-    this.server = createServer((request, response) => void this.handle(request, response));
+  start(): Promise<string> {
+    if (this.closing) return Promise.reject(new Error('配置面板已关闭'));
+    return this.starting ??= this.listen();
+  }
+
+  private async listen(): Promise<string> {
+    const server = createServer((request, response) => void this.handle(request, response));
+    this.server = server;
     await new Promise<void>((resolve, reject) => {
-      this.server!.once('error', reject);
-      // Loopback only: never expose the token or the config to the network.
-      this.server!.listen(0, '127.0.0.1', () => resolve());
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        server.removeListener('error', reject);
+        resolve();
+      });
     });
-    const address = this.server.address();
+    const address = server.address();
     this.port = typeof address === 'object' && address ? address.port : 0;
     return this.url;
   }
 
-  async stop(): Promise<void> {
-    if (!this.server) return;
-    await new Promise<void>(resolve => this.server!.close(() => resolve()));
-    this.server = undefined;
+  stop(): Promise<void> {
+    return this.closing ??= (async () => {
+      await this.starting?.catch(() => undefined);
+      for (const controller of this.requests) controller.abort();
+      const server = this.server;
+      this.server = undefined;
+      if (!server) return;
+      await new Promise<void>(resolve => {
+        server.close(() => resolve());
+        // Includes stalled POST bodies and keep-alive sockets; no new work is accepted.
+        server.closeAllConnections();
+      });
+    })();
   }
 
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -68,7 +89,19 @@ export class ConfigPanel {
       response.end(JSON.stringify({ error: 'forbidden' }));
       return;
     }
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    this.requests.add(controller);
+    response.once('close', abort);
+    const exclusive = ['/api/tasks', '/api/test', '/api/config'].includes(url.pathname);
+    let acquired = false;
     try {
+      if (this.closing) return this.json(response, 503, { error: 'shutting_down' });
+      if (exclusive) {
+        if (this.busy.has(url.pathname)) return this.json(response, 409, { error: '操作仍在进行，请稍后重试' });
+        this.busy.add(url.pathname);
+        acquired = true;
+      }
       if (request.method === 'GET' && url.pathname === '/') {
         response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
         response.end(panelHtml);
@@ -83,7 +116,7 @@ export class ConfigPanel {
         const current = this.hooks.getConfig();
         // An unchanged masked token means "keep the stored value".
         const incoming = body as Partial<SyncConfig>;
-        const token = typeof incoming.token === 'string' && !incoming.token.includes('*') ? incoming.token : current.token;
+        const token = typeof incoming.token === 'string' && incoming.token.trim() && !incoming.token.includes('*') ? incoming.token : current.token;
         const next = normalizeConfig({ ...current, ...incoming, token });
         const problems = validateConfig(next);
         if (problems.length) return this.json(response, 400, { error: problems.join(' ') });
@@ -92,7 +125,7 @@ export class ConfigPanel {
       }
       if (request.method === 'POST' && url.pathname === '/api/test') {
         const config = this.hooks.getConfig();
-        const result = await this.hooks.testConnection(config);
+        const result = await this.hooks.testConnection(config, controller.signal);
         return this.json(response, result.ok ? 200 : 400, result);
       }
       if (request.method === 'POST' && url.pathname === '/api/sync') {
@@ -104,15 +137,20 @@ export class ConfigPanel {
         return this.json(response, 200, { resumed: true, status: this.hooks.getStatus() });
       }
       if (request.method === 'GET' && url.pathname === '/api/tasks') {
-        return this.json(response, 200, { tasks: await this.hooks.listTasks() });
+        return this.json(response, 200, { tasks: await this.hooks.listTasks(controller.signal) });
       }
       this.json(response, 404, { error: 'not_found' });
     } catch (error) {
       this.json(response, 500, { error: error instanceof Error ? error.message : 'internal error' });
+    } finally {
+      if (acquired) this.busy.delete(url.pathname);
+      this.requests.delete(controller);
+      response.removeListener('close', abort);
     }
   }
 
   private json(response: ServerResponse, status: number, payload: unknown): void {
+    if (response.destroyed || response.writableEnded) return;
     response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
     response.end(JSON.stringify(payload));
   }

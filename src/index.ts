@@ -28,9 +28,11 @@ import { WebSessionService } from './web/session.js';
 import type { WebIdentity } from './web/session.js';
 import { adminPage } from './web/admin-page.js';
 import { loginPage } from './web/login-page.js';
-import { RateLimiter, securityHeaders } from './security/http.js';
+import { RateLimiter, securityHeaders, attachmentHeader } from './security/http.js';
 import { APP_VERSION, UpdateChecker } from './version.js';
 import { isRootMcpRequest, streamWithDeferredCleanup } from './mcp-routing.js';
+import { RequestLifecycle, createShutdown } from './lifecycle.js';
+import { operationContext, operationSignal, trackOperation } from './operations.js';
 
 const baseConfig = loadConfig();
 const logger = pino({ level: baseConfig.logLevel });
@@ -138,7 +140,11 @@ app.get('/auth/login', async context => {
   // error can never bounce the visitor between here and Authentik forever.
   if (context.req.query('probed') !== '1' && !context.req.query('reason')) {
     const returnTo = context.req.query('return_to') ?? '/admin';
-    try { return context.redirect(await webSessions.begin(returnTo, 'probe')); }
+    try {
+      const attempt = await webSessions.begin(returnTo, 'probe');
+      context.header('Set-Cookie', attempt.cookie);
+      return context.redirect(attempt.url);
+    }
     catch { return context.html(loginPage); }
   }
   return context.html(loginPage);
@@ -147,13 +153,14 @@ app.get('/auth/start', async context => {
   if (!(await settings.installation()).completed) return context.redirect('/setup');
   if (!config.authEnabled) return context.redirect('/admin');
   try {
-    const url = await webSessions.begin(context.req.query('return_to') ?? '/admin');
+    const { url, cookie } = await webSessions.begin(context.req.query('return_to') ?? '/admin');
+    context.header('Set-Cookie', cookie);
     // "Sign in as someone else" must reach the account picker even though an SSO
     // session exists, so forward the intent to Authentik.
     const target = context.req.query('switch') === '1'
       ? (() => { const u = new URL(url); u.searchParams.set('prompt', 'select_account'); return u.toString(); })()
       : url;
-    context.header('Set-Cookie', webSessions.clearProbeHintCookie());
+    context.header('Set-Cookie', webSessions.clearProbeHintCookie(), { append: true });
     return context.redirect(target);
   }
   catch (error) { return context.json({ error: 'login_failed', error_description: error instanceof Error ? error.message : 'Login failed.' }, 500); }
@@ -165,20 +172,27 @@ app.get('/auth/callback', async context => {
   // A silent probe answers with an error rather than a code when Authentik has no
   // usable SSO session. Treat those as "not signed in" and fall through quietly.
   if (!code && failure) {
-    return context.redirect(WebSessionService.isProbeMiss(failure)
-      ? '/auth/login?probed=1'
-      : '/auth/login?probed=1&reason=probe_failed');
+    try {
+      if (!state) throw new Error('Missing state.');
+      const purpose = await webSessions.failedCallback(state, context.req.header('cookie'));
+      context.header('Set-Cookie', webSessions.clearLoginCookie(state));
+      return context.redirect(purpose === 'probe' && WebSessionService.isProbeMiss(failure)
+        ? '/auth/login?probed=1'
+        : '/auth/login?probed=1&reason=probe_failed');
+    } catch { return context.json({ error: 'invalid_callback' }, 400); }
   }
   if (!code || !state) return context.json({ error: 'invalid_callback', error_description: 'Missing code or state.' }, 400);
   // Probe transactions are claimed by purpose, so this never consumes a login.
   try {
-    const probed = await webSessions.probeCallback(code, state);
-    context.header('Set-Cookie', webSessions.probeHintCookie(probed.displayName));
+    const probed = await webSessions.probeCallback(code, state, context.req.header('cookie'));
+    context.header('Set-Cookie', webSessions.clearLoginCookie(state));
+    context.header('Set-Cookie', webSessions.probeHintCookie(probed.displayName), { append: true });
     return context.redirect(`/auth/login?probed=1&return_to=${encodeURIComponent(probed.returnTo)}`);
   } catch { /* Not a probe; fall through to the ordinary login exchange. */ }
   try {
-    const result = await webSessions.callback(code, state);
+    const result = await webSessions.callback(code, state, context.req.header('cookie'));
     context.header('Set-Cookie', webSessions.cookie(result.token));
+    context.header('Set-Cookie', webSessions.clearLoginCookie(state), { append: true });
     // A response can carry both the new session cookie and the old probe-cookie
     // deletion. Append the second Set-Cookie instead of replacing the session.
     context.header('Set-Cookie', webSessions.clearProbeHintCookie(), { append: true });
@@ -308,7 +322,7 @@ app.get('/api/admin/exports', async context => {
     await audit.record({ actorUserId: identity.userId, spaceId: query.space_id, authSource: webAuthSource(),
       action: 'web.GET./api/admin/exports', targetType: 'space_export', targetId: query.space_id, result: 'success', metadata: { format: query.format } });
     context.header('Content-Type', `${exported.mimeType}; charset=utf-8`);
-    context.header('Content-Disposition', `attachment; filename="${exported.filename}"`);
+    context.header('Content-Disposition', attachmentHeader(exported.filename));
     return context.body(exported.content);
   } catch (error) {
     await audit.record({ actorUserId: identity?.userId, authSource: identity ? webAuthSource() : undefined,
@@ -449,24 +463,26 @@ async function handleMcp(context: Context): Promise<Response> {
   const server = createServer(database, principal, audit, () => config);
   // Stateless transport prevents one authenticated client's session from being reused by another principal.
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  await server.connect(transport);
-  let closed = false;
-  const cleanup = async () => {
-    if (closed) return;
-    closed = true;
+  let failed = false;
+  const requestContext = operationContext.getStore();
+  let closing: Promise<void> | undefined;
+  const cleanup = () => closing ??= trackOperation(async () => {
     await transport.close().catch(() => undefined);
     await server.close().catch(() => undefined);
-    if (tracker) await tracker.finish().catch(() => undefined);
-  };
+    if (tracker) await tracker.finish({ failed }).catch(() => undefined);
+  }, requestContext);
   let response: Response;
-  try { response = await transport.handleRequest(context.req.raw, { parsedBody: context.get('parsedBody' as never) as unknown }); }
-  catch (error) {
-    logger.error({ err: error, principal: principal.id }, 'MCP transport request failed');
-    if (tracker) await tracker.finish({ failed: true }).catch(() => undefined);
+  try {
+    operationSignal()?.throwIfAborted();
+    await server.connect(transport);
+    response = await transport.handleRequest(context.req.raw, { parsedBody: context.get('parsedBody' as never) as unknown });
+  } catch (error) {
+    failed = !operationSignal()?.aborted;
+    if (failed) logger.error({ err: error, principal: principal.id }, 'MCP transport request failed');
     await cleanup();
     return context.json({ error: 'MCP request failed.' }, 500);
   }
-  return streamWithDeferredCleanup(response, cleanup);
+  return streamWithDeferredCleanup(response, cleanup, operationSignal());
 }
 
 /**
@@ -513,13 +529,21 @@ function clientAddressFor(context: Context): string | undefined {
   return context.req.header('x-real-ip')?.slice(0, 64);
 }
 
-serve({ fetch: app.fetch, hostname: baseConfig.host, port: baseConfig.port }, info => logger.info({ host: baseConfig.host, port: info.port }, 'Sakura MCP Server listening'));
-
+const requests = new RequestLifecycle();
+const httpServer = serve({ fetch: (request, env) => requests.handle(request, req => app.fetch(req, env)),
+  hostname: baseConfig.host, port: baseConfig.port },
+info => logger.info({ host: baseConfig.host, port: info.port }, 'Sakura MCP Server listening'));
+const shutdown = createShutdown(httpServer, requests, worker, database);
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
-  process.once(signal, () => {
+  process.on(signal, () => {
     logger.info({ signal }, 'Sakura MCP Server shutting down');
-    worker.stop();
-    void database.close().finally(() => process.exit(0));
+    void shutdown().then(clean => {
+      if (!clean) logger.error('Sakura MCP Server shutdown timed out or cleanup failed');
+      process.exit(clean ? 0 : 1);
+    }, error => {
+      logger.error({ err: error }, 'Sakura MCP Server shutdown failed');
+      process.exit(1);
+    });
   });
 }
 

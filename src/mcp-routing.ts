@@ -14,20 +14,45 @@ export function isRootMcpRequest(method: string, headers: Headers): boolean {
  * eagerly (in a `finally`) tore the stream down and clients saw an empty stream
  * that timed out. Non-streaming responses run cleanup immediately.
  */
-export function streamWithDeferredCleanup(response: Response, cleanup: () => Promise<void>): Response {
-  let done = false;
-  const runOnce = async () => { if (done) return; done = true; await cleanup(); };
-  if (!response.body) { void runOnce(); return response; }
-  const reader = response.body.getReader();
+export function streamWithDeferredCleanup(response: Response, cleanup: () => Promise<void>, signal?: AbortSignal): Response {
+  let completion: Promise<void> | undefined;
+  let ended = false;
+  let output: ReadableStreamDefaultController<Uint8Array>;
+  const reader = response.body?.getReader();
+  const runOnce = () => completion ??= Promise.resolve().then(cleanup).catch(() => undefined);
+  const finish = async (reason?: unknown, cancel = false) => {
+    if (ended) { await runOnce(); return; }
+    ended = true;
+    signal?.removeEventListener('abort', abort);
+    // Start cleanup even if an upstream cancel implementation never resolves.
+    const cleaned = runOnce();
+    try { if (cancel) await reader?.cancel(reason).catch(() => undefined); }
+    finally { reader?.releaseLock(); }
+    await cleaned;
+  };
+  const abort = () => {
+    if (!ended) output?.error(signal?.reason);
+    void finish(signal?.reason, true);
+  };
+  if (!reader) { void finish(); return response; }
   const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      output = controller;
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort();
+    },
     async pull(controller) {
       try {
-        const { done: finished, value } = await reader.read();
-        if (finished) { controller.close(); await runOnce(); return; }
-        controller.enqueue(value);
-      } catch (error) { controller.error(error); await runOnce(); }
+        const { done, value } = await reader.read();
+        if (ended) return;
+        if (done) { controller.close(); await finish(); }
+        else controller.enqueue(value);
+      } catch (error) {
+        if (!ended) controller.error(error);
+        await finish();
+      }
     },
-    async cancel(reason) { await reader.cancel(reason).catch(() => undefined); await runOnce(); }
+    async cancel(reason) { await finish(reason, true); }
   });
-  return new Response(stream, { status: response.status, headers: response.headers });
+  return new Response(stream, { status: response.status, statusText: response.statusText, headers: response.headers });
 }

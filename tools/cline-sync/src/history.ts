@@ -70,7 +70,8 @@ export async function loadHistory(dir = dataDir()): Promise<SyncHistory> {
  * can keep rendering the previous snapshot while the new one is being saved.
  */
 export function recordRun(summary: SyncSummary, history: SyncHistory = emptyHistory()): SyncHistory {
-  const messages = summary.outcomes.reduce((sum, outcome) => sum + outcome.newMessages, 0);
+  const messages = summary.outcomes.reduce((sum, outcome) =>
+    sum + (outcome.status === 'synced' ? outcome.newMessages : 0), 0);
   const record: RunRecord = {
     startedAt: summary.startedAt,
     finishedAt: summary.finishedAt,
@@ -86,7 +87,7 @@ export function recordRun(summary: SyncSummary, history: SyncHistory = emptyHist
       runs: history.totals.runs + 1,
       syncedTasks: history.totals.syncedTasks + summary.synced,
       messages: history.totals.messages + messages,
-      extractions: history.totals.extractions + summary.synced,
+      extractions: history.totals.extractions + (summary.extractionCalls ?? summary.synced),
       failedTasks: history.totals.failedTasks + summary.failed
     }
   };

@@ -14,6 +14,14 @@
 - **隐私可选**：同时支持 OpenAI-compatible API 和本地 Ollama。
 - **不锁定数据**：保留原始内容，支持导入、导出、备份和重新生成向量。
 
+## 本次升级注意事项
+
+- 应用启动会按 `AUTO_MIGRATE` 执行新增的 `011`（OIDC 浏览器绑定）和 `012`（向量一致性）迁移；升级前尚未完成的登录需重新发起。
+- 内容、摘要或标签修改（含冲突合并）后旧向量立即失效，避免召回旧语义；可在后台重建向量。混合搜索在 PostgreSQL 内对全空间排序，只向应用返回限制条数。
+- 应用容器固定使用 UID/GID `10001:10001`。Compose 启动前会将挂载 `data` 目录及普通文件/子目录权限调整为该用户可写；此目录应仅用于应用数据。自定义外部审计路径需自行授权。不会删除数据库卷。
+- 容器健康检查使用回环 TCP 连接及配置的公网 Host，不放宽外部 Host 校验；`npm pack` 会自动先构建，发布包包含编译产物和迁移。
+
+
 ## v0.2.0 架构
 
 ```text
@@ -232,7 +240,7 @@ Resource URI 不是权限凭据；每次读取仍校验 Bearer 身份、Agent gr
 
 ## PostgreSQL 后台 Worker
 
-服务内置持久化 Worker，首个任务类型是空间 Embedding 批量重建。任务使用 PostgreSQL `FOR UPDATE SKIP LOCKED` 原子领取，因此多副本部署不会重复消费同一任务。任务记录包含：
+服务内置持久化 Worker，首个任务类型是空间 Embedding 批量重建。单实例始终只执行一个任务；多副本使用 PostgreSQL `FOR UPDATE SKIP LOCKED` 原子领取，心跳续租和持锁者校验防止旧 Worker 覆盖任务状态。队列是可重试的至少一次执行，不承诺崩溃或租约失效时绝不重复调用 Provider。任务记录包含：
 
 ```text
 job_type / payload / status
@@ -241,7 +249,25 @@ locked_at / locked_by / cancel_requested
 total / completed / failed / errors
 ```
 
-处理实例崩溃后，超过 `WORKER_STALE_AFTER_SECONDS` 的 processing 任务会自动回到队列。失败任务按指数退避自动重试，达到最大次数后标记 `failed`；用户也可取消和手工重试。取消是协作式的，Worker 每处理完一条记忆检查一次取消标记。
+处理实例崩溃后，超过 `WORKER_STALE_AFTER_SECONDS` 的 processing 任务会被回收：已请求取消的标记 `cancelled`，达到最大尝试次数的标记 `failed`，其余重新入队。失败任务按指数退避重试；用户也可取消和手工重试。Worker 每条记忆后检查取消，同时独立心跳通常每 5 秒检查一次，因此不必等慢 Provider 请求完成才取消（数据库拥塞会延迟检查）。重建每页最多保留 100 个 ID，错误摘要最多 100 条，失败总数仍完整统计。
+
+### 容器关闭与资源回收
+
+- Docker Compose 使用 `init: true` 转发信号并回收孤儿进程；入口脚本仍用 `exec node`，停止信号为 `SIGTERM`。
+- 收到 `SIGTERM` / `SIGINT` 后停止接收请求和领取任务，取消在途 AI Provider 请求，等待 HTTP/MCP 清理与 Worker 释放任务锁，最后关闭 PostgreSQL 连接池。重复信号共用一次关闭流程。
+- 应用关闭上限 25 秒，低于 Compose 的 `stop_grace_period: 30s`；超时强制关闭连接并以非零状态退出。强制退出未释放的锁由队列超时恢复。
+- 每进程最多接纳 128 个并发 HTTP 请求（包含未结束的响应流）；超出返回 `503` 和 `Retry-After: 1`，不建立无限等待队列。
+- 客户端断开会取消所属 Provider 请求；请求成功、失败或取消后清理超时定时器与取消监听器。已写入数据库的记忆不会回滚，取消中的向量可能保持 `pending`，可通过重建恢复。
+- 正常关闭中断的后台任务重新入队且不消耗失败重试次数；重启后从该任务开头重新重建，而非断点续建。
+
+修改不需要新数据库迁移或重置配置。尚未发布镜像时，可从源码在项目目录使用开发 Compose 覆盖构建并仅替换应用（保留数据库和数据卷）：
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.dev.yml build sakura-mcp
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --no-deps sakura-mcp
+```
+
+不要使用 `down -v`；仅拉取旧的 `0.3.4` 镜像不会包含本地修复。
 
 ```dotenv
 WORKER_ENABLED=true

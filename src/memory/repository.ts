@@ -95,6 +95,7 @@ export class MemoryRepository {
     const client = await this.database.pool.connect();
     try {
       await client.query('BEGIN');
+      await client.query('SELECT id FROM memories WHERE id=$1 FOR UPDATE', [memoryId]);
       const version = await client.query<{ next: number }>('SELECT coalesce(max(version),0)+1 AS next FROM memory_versions WHERE memory_id=$1', [memoryId]);
       const result = await client.query<MemoryRecord>(
         `UPDATE memories SET content=coalesce($2,content),summary=coalesce($3,summary),tags=coalesce($4,tags),

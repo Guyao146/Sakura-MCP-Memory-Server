@@ -1,8 +1,17 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { SyncSummary } from '../src/sync.js';
-import { SyncScheduler } from '../src/scheduler.js';
+import { SyncScheduler as Scheduler, type SchedulerOptions } from '../src/scheduler.js';
+import { normalizeConfig, type SyncConfig } from '../src/config.js';
 import { emptyHistory } from '../src/history.js';
-import { normalizeConfig } from '../src/config.js';
+
+const schedulers: Scheduler[] = [];
+class SyncScheduler extends Scheduler {
+  constructor(config: SyncConfig, log: (message: string) => void, options: SchedulerOptions = {}) {
+    super(config, log, { ...options, saveHistoryImpl: async () => undefined });
+    schedulers.push(this);
+  }
+}
+afterEach(async () => { await Promise.all(schedulers.splice(0).map(s => s.close())); });
 
 const baseConfig = () => normalizeConfig({
   mcpUrl: 'https://mcp.example.com/mcp', token: 'sk_sakura_x', enabled: true, intervalMinutes: 10
@@ -18,9 +27,9 @@ function summary(failed: number, synced: number): SyncSummary {
 
 /** A sync entry point the test drives directly: no disk, no network. */
 function scriptedSync(planned: SyncSummary[]): { impl: typeof import('../src/sync.js').runSync; calls: number } {
-  const calls = { current: 0 };
-  const impl = async () => planned[Math.min(calls.current, planned.length - 1)] as SyncSummary;
-  return { impl: impl as never, calls: calls as never };
+  let calls = 0;
+  const impl = async () => planned[Math.min(calls++, planned.length - 1)] as SyncSummary;
+  return { impl, get calls() { return calls; } };
 }
 
 describe('circuit breaker', () => {
@@ -48,15 +57,14 @@ describe('circuit breaker', () => {
   });
 
   it('a success resets the failure streak', async () => {
-    const { impl } = scriptedSync([summary(1, 0), summary(0, 1)]);
+    const { impl } = scriptedSync([summary(1, 0), summary(1, 0), summary(0, 1), summary(1, 0), summary(1, 0)]);
     const scheduler = new SyncScheduler(baseConfig(), () => undefined, { runSyncImpl: impl });
-    await scheduler.runOnce();
-    await scheduler.runOnce();
+    for (let i = 0; i < 5; i++) await scheduler.runOnce();
     expect(scheduler.status().halted).toBe(false);
   });
 
   it('resume clears the halt and reschedules', async () => {
-    const failing = Array.from({ length: 3 }, () => summary(1, 0));
+    const failing = [...Array.from({ length: 3 }, () => summary(1, 0)), summary(0, 1)];
     const { impl } = scriptedSync(failing);
     const scheduler = new SyncScheduler(baseConfig(), () => undefined, { runSyncImpl: impl });
     for (let i = 0; i < 3; i += 1) await scheduler.runOnce();
@@ -66,11 +74,9 @@ describe('circuit breaker', () => {
     expect(scheduler.status().halted).toBe(false);
     expect(scheduler.status().nextRunAt).not.toBeNull();
 
-    // A recovered run after resume does not re-halt immediately.
-    const recovered = scriptedSync([summary(0, 1)]);
-    const restored = new SyncScheduler(baseConfig(), () => undefined, { runSyncImpl: recovered.impl });
-    await restored.runOnce();
-    expect(restored.status().halted).toBe(false);
+    // A recovered run on the same scheduler must not re-halt immediately.
+    await scheduler.runOnce();
+    expect(scheduler.status().halted).toBe(false);
   });
 });
 

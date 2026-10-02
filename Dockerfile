@@ -15,8 +15,10 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/migrations ./migrations
 COPY scripts/container-entrypoint.sh ./container-entrypoint.sh
-RUN chmod 0555 /app/container-entrypoint.sh && groupadd --system mcp && useradd --system --gid mcp --home-dir /app --no-create-home mcp && mkdir -p /app/data && chown -R mcp:mcp /app
+COPY scripts/healthcheck.mjs ./healthcheck.mjs
+RUN chmod 0555 /app/container-entrypoint.sh && groupadd --system --gid 10001 mcp && useradd --system --uid 10001 --gid mcp --home-dir /app --no-create-home mcp && mkdir -p /app/data && chown -R mcp:mcp /app
 USER mcp
 EXPOSE 3000
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD node -e "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+STOPSIGNAL SIGTERM
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD ["node", "/app/healthcheck.mjs"]
 ENTRYPOINT ["/app/container-entrypoint.sh"]

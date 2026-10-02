@@ -1,8 +1,23 @@
 import { Hono } from 'hono';
 import { describe, expect, it } from 'vitest';
-import { RateLimiter, securityHeaders } from '../src/security/http.js';
+import { RateLimiter, securityHeaders, attachmentHeader } from '../src/security/http.js';
 
 describe('HTTP production security', () => {
+  it.each(['记忆空间-😀.json', 'a"\r\nb.json', 'broken\ud800.json'])('encodes a portable download header for %j', async filename => {
+    const app = new Hono();
+    app.get('/export', context => {
+      context.header('Content-Disposition', attachmentHeader(filename));
+      return context.text('export');
+    });
+    const response = await app.request('/export');
+    expect(response.status).toBe(200);
+    const header = response.headers.get('content-disposition')!;
+    expect(header).toMatch(/^attachment; filename="[A-Za-z0-9._-]+"; filename\*=UTF-8''/);
+    expect(header).not.toMatch(/[\r\n\u0080-\uffff]/);
+    expect(decodeURIComponent(header.split("UTF-8''")[1])).toBe(Buffer.from(filename.replace(/[\r\n]/g, ''), 'utf8').toString('utf8'));
+  });
+
+
   it('adds browser hardening headers', async () => {
     const app = new Hono();
     app.use('*', securityHeaders());

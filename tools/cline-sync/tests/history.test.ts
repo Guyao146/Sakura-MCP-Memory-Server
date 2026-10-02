@@ -13,10 +13,23 @@ const summary = (synced: number, failed: number, messages: number): SyncSummary 
 });
 
 describe('sync history', () => {
+  it('counts every chunk request, including failures, rather than completed tasks', () => {
+    const run = { ...summary(1, 1, 4), extractionCalls: 5 };
+    expect(recordRun(run).totals.extractions).toBe(5);
+  });
+
+
   it('accumulates counters across runs', () => {
     const history = recordRun(summary(2, 0, 10), recordRun(summary(1, 1, 4), emptyHistory()));
     expect(history.totals).toEqual({ runs: 2, syncedTasks: 3, messages: 14, extractions: 3, failedTasks: 1 });
     expect(history.runs).toHaveLength(2);
+  });
+
+  it('counts only successfully uploaded messages, not skipped or failed ones', () => {
+    const run = summary(1, 1, 4);
+    run.outcomes.push({ taskId: 'failed', status: 'failed', newMessages: 10 },
+      { taskId: 'skipped', status: 'skipped', newMessages: 1 });
+    expect(recordRun(run).totals.messages).toBe(4);
   });
 
   it('caps the run log at 50 entries', () => {

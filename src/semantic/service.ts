@@ -1,4 +1,5 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { operationSignal } from '../operations.js';
 import type { AppConfig } from '../config.js';
 import type { Database } from '../database.js';
 import { requireSpaceRole } from '../memory/permissions.js';
@@ -61,15 +62,17 @@ export class SemanticMemoryService {
   }
 
   async remember(userId: string, input: RememberInput): Promise<MemoryRecord & { embeddingStatus: string }> {
+    operationSignal()?.throwIfAborted();
     const memory = await this.repository.remember(userId, input);
-    const embeddingStatus = await this.embedMemory(userId, memory).catch(() => 'failed');
+    const embeddingStatus = await this.embedMemory(userId, memory).catch(() => operationSignal()?.aborted ? 'pending' : 'failed');
     return { ...memory, embeddingStatus };
   }
 
   async update(userId: string, memoryId: string, patch: Parameters<MemoryRepository['update']>[2], reason: string) {
+    operationSignal()?.throwIfAborted();
     const memory = await this.repository.update(userId, memoryId, patch, reason);
     const contentChanged = patch.content !== undefined || patch.summary !== undefined || patch.tags !== undefined;
-    const embeddingStatus = contentChanged ? await this.embedMemory(userId, memory).catch(() => 'failed') : await this.embeddingStatus(memory.id);
+    const embeddingStatus = contentChanged ? await this.embedMemory(userId, memory).catch(() => operationSignal()?.aborted ? 'pending' : 'failed') : await this.embeddingStatus(memory.id);
     return { ...memory, embeddingStatus };
   }
 
@@ -79,25 +82,24 @@ export class SemanticMemoryService {
     if (!resolved || !query.trim()) return this.repository.search(userId, spaceId, query, limit, types, tags);
     let queryEmbedding: number[];
     try { queryEmbedding = (await resolved.provider.embed([query], resolved.embeddingModel))[0]; }
-    catch { return this.repository.search(userId, spaceId, query, limit, types, tags); }
-    if (!queryEmbedding?.length) return this.repository.search(userId, spaceId, query, limit, types, tags);
-    const result = await this.database.query<MemoryRecord & { text_rank: number; embedding_text: string | null; dimensions: number | null }>(
-      `SELECT m.*,ts_rank_cd(m.search_vector,websearch_to_tsquery('simple',$2)) AS text_rank,
-       CASE WHEN me.status='ready' THEN me.embedding::text ELSE NULL END AS embedding_text,me.dimensions
+    catch { operationSignal()?.throwIfAborted(); return this.repository.search(userId, spaceId, query, limit, types, tags); }
+    if (!queryEmbedding?.length || queryEmbedding.some(value => !Number.isFinite(value))) return this.repository.search(userId, spaceId, query, limit, types, tags);
+    // Rank in PostgreSQL across the entire space, not only the most recent 1000 rows.
+    const result = await this.database.query<MemoryRecord & { score: number }>(
+      `SELECT m.*,
+       (0.60 * CASE WHEN me.status='ready' AND me.dimensions=$6 AND me.model=$7
+         THEN coalesce(1 - (me.embedding <=> $5::vector),0) ELSE 0 END
+        + 0.25 * greatest(least(ts_rank_cd(m.search_vector,websearch_to_tsquery('simple',$2))*4,1),
+          CASE WHEN strpos(lower(m.content),lower($2))>0 THEN 1 ELSE 0 END)
+        + 0.10 * m.importance + 0.05 * m.confidence) AS score
        FROM memories m LEFT JOIN memory_embeddings me ON me.memory_id=m.id
        WHERE m.space_id=$1 AND m.status IN ('active','pending_confirmation') AND m.deleted_at IS NULL
        AND (m.expires_at IS NULL OR m.expires_at>now())
        AND ($3::text[] IS NULL OR m.type::text=ANY($3)) AND ($4::text[] IS NULL OR m.tags&&$4)
-       ORDER BY m.updated_at DESC LIMIT 1000`,
-      [spaceId, query, types?.length ? types : null, tags?.length ? tags : null]);
-    return result.rows.map(row => {
-      const candidate = row.dimensions === queryEmbedding.length && row.embedding_text ? parseVector(row.embedding_text) : undefined;
-      const semantic = candidate ? cosineSimilarity(queryEmbedding, candidate) : 0;
-      const score = 0.60 * semantic + 0.25 * Math.min(Number(row.text_rank) * 4, 1)
-        + 0.10 * Number(row.importance) + 0.05 * Number(row.confidence);
-      const { embedding_text: _embedding, dimensions: _dimensions, text_rank: _rank, ...memory } = row;
-      return { ...memory, score };
-    }).sort((left, right) => right.score - left.score).slice(0, limit);
+       ORDER BY score DESC,m.updated_at DESC,m.id LIMIT $8`,
+      [spaceId, query, types?.length ? types : null, tags?.length ? tags : null,
+        `[${queryEmbedding.join(',')}]`, queryEmbedding.length, resolved.embeddingModel, limit]);
+    return result.rows;
   }
 
   async extract(userId: string, spaceId: string, text: string): Promise<ExtractedMemory[]> {
@@ -107,10 +109,12 @@ export class SemanticMemoryService {
     return resolved.provider.extractMemories(text, resolved.chatModel);
   }
 
-  async rebuildEmbedding(userId: string, memoryId: string): Promise<{ memoryId: string; status: string }> {
+  async rebuildEmbedding(userId: string, memoryId: string, signal?: AbortSignal): Promise<{ memoryId: string; status: string }> {
+    signal = operationSignal(signal);
+    signal?.throwIfAborted();
     const memory = await this.repository.get(userId, memoryId);
     await requireSpaceRole(this.database, userId, memory.space_id, 'editor');
-    const status = await this.embedMemory(userId, memory).catch(() => 'failed');
+    const status = await this.embedMemory(userId, memory, signal).catch(() => { signal?.throwIfAborted(); return 'failed'; });
     return { memoryId, status };
   }
 
@@ -120,42 +124,58 @@ export class SemanticMemoryService {
     const governance = new MemoryGovernanceService(this.database);
     const stored = [];
     for (const candidate of candidates.slice(0, 50)) {
+      operationSignal()?.throwIfAborted();
       const memory = await this.remember(userId, { spaceId, ...candidate,
         source: { type: 'automatic_extraction', agent: sourceAgent, excerpt: text.slice(0, 10_000) } });
-      const governanceResult = strategy.auto_merge_enabled || strategy.conflict_detection_enabled
-        ? await governance.detect(userId, memory.id) : undefined;
+      const governanceResult = !operationSignal()?.aborted && (strategy.auto_merge_enabled || strategy.conflict_detection_enabled)
+        ? await governance.detectAfterWrite(userId, memory.id) : undefined;
       stored.push({ ...memory, governance: governanceResult });
     }
     return stored;
   }
 
-  private async embedMemory(userId: string, memory: MemoryRecord): Promise<string> {
+  private async embedMemory(userId: string, memory: MemoryRecord, signal?: AbortSignal): Promise<string> {
+    signal = operationSignal(signal);
+    signal?.throwIfAborted();
     const resolved = await this.resolve(userId, memory.space_id, 'embedding');
+    signal?.throwIfAborted();
     const content = `${memory.summary}\n${memory.content}\n${memory.tags.join(' ')}`.trim();
     const contentHash = createHash('sha256').update(content).digest('hex');
+    const requestId = randomUUID();
     if (!resolved?.embeddingModel) {
-      await this.storeEmbedding(memory.id, 'unconfigured', contentHash, 'failed', undefined, 'No Embedding Provider configured.');
+      await this.storeEmbedding(memory, requestId, 'unconfigured', contentHash, 'failed', undefined, 'No Embedding Provider configured.');
       return 'failed';
     }
-    await this.storeEmbedding(memory.id, resolved.embeddingModel, contentHash, 'pending');
+    if (!await this.storeEmbedding(memory, requestId, resolved.embeddingModel, contentHash, 'pending')) return 'superseded';
     try {
-      const embedding = (await resolved.provider.embed([content], resolved.embeddingModel))[0];
+      const embedding = (await resolved.provider.embed([content], resolved.embeddingModel, signal))[0];
+      signal?.throwIfAborted();
       if (!embedding?.length || embedding.some(value => !Number.isFinite(value))) throw new Error('Provider returned an invalid embedding.');
-      await this.storeEmbedding(memory.id, resolved.embeddingModel, contentHash, 'ready', embedding);
-      return 'ready';
+      const stored = await this.storeEmbedding(memory, requestId, resolved.embeddingModel, contentHash, 'ready', embedding);
+      return stored ? 'ready' : 'superseded';
     } catch (error) {
-      await this.storeEmbedding(memory.id, resolved.embeddingModel, contentHash, 'failed', undefined, error instanceof Error ? error.message : 'Embedding failed.');
+      signal?.throwIfAborted();
+      const stored = await this.storeEmbedding(memory, requestId, resolved.embeddingModel, contentHash, 'failed', undefined, error instanceof Error ? error.message : 'Embedding failed.');
+      if (!stored) return 'superseded';
       throw error;
     }
   }
 
-  private async storeEmbedding(memoryId: string, model: string, contentHash: string, status: 'pending'|'ready'|'failed', embedding?: number[], error?: string) {
+  private async storeEmbedding(memory: MemoryRecord, requestId: string, model: string, contentHash: string, status: 'pending'|'ready'|'failed', embedding?: number[], error?: string): Promise<boolean> {
     const vector = embedding ? `[${embedding.join(',')}]` : null;
-    await this.database.query(
-      `INSERT INTO memory_embeddings(memory_id,model,dimensions,embedding,content_hash,status,error)
-       VALUES($1,$2,$3,$4::vector,$5,$6,$7) ON CONFLICT(memory_id) DO UPDATE SET model=EXCLUDED.model,
-       dimensions=EXCLUDED.dimensions,embedding=EXCLUDED.embedding,content_hash=EXCLUDED.content_hash,status=EXCLUDED.status,error=EXCLUDED.error,updated_at=now()`,
-      [memoryId, model, embedding?.length ?? null, vector, contentHash, status, error ?? null]);
+    const result = await this.database.query(
+      `WITH current_memory AS MATERIALIZED (
+         SELECT id FROM memories WHERE id=$1 AND embedding_revision=$8 AND deleted_at IS NULL FOR UPDATE
+       )
+       INSERT INTO memory_embeddings(memory_id,model,dimensions,embedding,content_hash,status,error,request_id)
+       SELECT id,$2,$3,$4::vector,$5,$6,$7,$9::uuid FROM current_memory WHERE true
+       ON CONFLICT(memory_id) DO UPDATE SET model=EXCLUDED.model,
+       dimensions=EXCLUDED.dimensions,embedding=EXCLUDED.embedding,content_hash=EXCLUDED.content_hash,
+       status=EXCLUDED.status,error=EXCLUDED.error,request_id=EXCLUDED.request_id,updated_at=now()
+       WHERE $6='pending' OR memory_embeddings.request_id=$9::uuid
+       RETURNING memory_id`,
+      [memory.id, model, embedding?.length ?? null, vector, contentHash, status, error ?? null, memory.embedding_revision, requestId]);
+    return result.rows.length > 0;
   }
 
   private async embeddingStatus(memoryId: string): Promise<string> {
@@ -180,18 +200,4 @@ export class SemanticMemoryService {
     if (capability === 'embedding' && !resolved.embeddingModel) return undefined;
     return resolved;
   }
-}
-
-function parseVector(value: string): number[] {
-  return value.slice(1, -1).split(',').map(Number);
-}
-
-function cosineSimilarity(left: number[], right: number[]): number {
-  if (left.length !== right.length || left.length === 0) return 0;
-  let dot = 0; let leftNorm = 0; let rightNorm = 0;
-  for (let index = 0; index < left.length; index += 1) {
-    dot += left[index] * right[index]; leftNorm += left[index] ** 2; rightNorm += right[index] ** 2;
-  }
-  if (!leftNorm || !rightNorm) return 0;
-  return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
 }

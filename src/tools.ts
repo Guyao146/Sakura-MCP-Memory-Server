@@ -1,4 +1,4 @@
-import { McpServer, ResourceTemplate } from '@modelcontextprotocol/server';
+import { McpServer, ResourceTemplate, type ServerContext } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import type { Principal } from './auth.js';
 import { requireScopes } from './auth.js';
@@ -14,6 +14,7 @@ import { MemoryGovernanceService } from './governance/service.js';
 import { MemoryTransferService } from './transfer/service.js';
 import { JobRepository } from './jobs/repository.js';
 import { APP_VERSION } from './version.js';
+import { operationSignal, trackOperation } from './operations.js';
 
 const memoryType = z.enum(['fact', 'preference', 'event', 'task', 'person', 'project', 'summary', 'document', 'idea', 'other']);
 const text = (value: unknown) => ({
@@ -31,25 +32,28 @@ export function createServer(database: Database, principal: Principal, audit: Au
   const jobs = new JobRepository(database);
   const agents = new AgentRepository(database, getConfig().setup.encryptionKey);
   const spaces = new SpaceRepository(database);
-  const identity = repository.ensureUser(principal.id, { email: principal.email, displayName: principal.displayName });
+  const identity = trackOperation(() => repository.ensureUser(principal.id, { email: principal.email, displayName: principal.displayName }));
   const requireHuman = () => {
     if (principal.source === 'api_key') throw new Error('This operation requires an interactive user.');
   };
-  const guarded = <T>(name: string, scopes: Scope[], handler: (args: T, userId: string, personalSpaceId: string) => Promise<unknown>) => async (args: T) => {
+  const guarded = <T>(name: string, scopes: Scope[], handler: (args: T, userId: string, personalSpaceId: string) => Promise<unknown>) => (args: T, ctx: ServerContext) => trackOperation(async () => {
     let actorUserId: string | undefined;
     try {
+      operationSignal()?.throwIfAborted();
       requireScopes(principal, scopes);
       const { userId, personalSpaceId } = await identity;
       actorUserId = userId;
+      operationSignal()?.throwIfAborted();
       const result = await handler(args, userId, personalSpaceId);
       await audit.write(principal, `mcp.${name}`, 'success', { arguments: args as unknown }, userId);
       return text(result);
     } catch (error) {
+      if (operationSignal()?.aborted) return failure('Request cancelled.');
       const message = error instanceof Error ? error.message : 'Unexpected error.';
-      await audit.write(principal, `mcp.${name}`, 'error', { arguments: args as unknown, message }, actorUserId);
+      await audit.write(principal, `mcp.${name}`, 'error', { arguments: args as unknown, errorType: error instanceof Error ? error.name : 'Error' }, actorUserId);
       return failure(message);
     }
-  };
+  }, undefined, ctx.mcpReq.signal);
 
   server.registerTool('memory_remember', {
     description: 'Store a durable memory in the caller personal space or an authorized shared space.',
@@ -187,7 +191,7 @@ export function createServer(database: Database, principal: Principal, audit: Au
 
   server.registerTool('memory_import_status', {
     description: 'Read a memory import job and per-record error summary.', inputSchema: { job_id: z.string().uuid() }
-  }, guarded('memory_import_status', ['memory:read'], async (args, userId) => transfer.status(userId, args.job_id)));
+  }, guarded('memory_import_status', ['memory:read'], async (args, userId) => transfer.status(userId, args.job_id, principal.agentId)));
 
   server.registerTool('memory_export', {
     description: 'Export an authorized memory space as portable JSON or Markdown.',
@@ -218,15 +222,15 @@ export function createServer(database: Database, principal: Principal, audit: Au
 
   server.registerTool('background_job_status', {
     description: 'Read a background job status and progress.', inputSchema: { job_id: z.string().uuid() }
-  }, guarded('background_job_status', ['memory:read'], async (args, userId) => jobs.get(userId, args.job_id)));
+  }, guarded('background_job_status', ['memory:read'], async (args, userId) => jobs.get(userId, args.job_id, principal.agentId)));
 
   server.registerTool('background_job_cancel', {
     description: 'Request cancellation of a pending or processing background job.', inputSchema: { job_id: z.string().uuid() }
-  }, guarded('background_job_cancel', ['space:manage'], async (args, userId) => jobs.cancel(userId, args.job_id)));
+  }, guarded('background_job_cancel', ['space:manage'], async (args, userId) => jobs.cancel(userId, args.job_id, principal.agentId)));
 
   server.registerTool('background_job_retry', {
     description: 'Retry a failed or cancelled background job from the beginning.', inputSchema: { job_id: z.string().uuid() }
-  }, guarded('background_job_retry', ['space:manage'], async (args, userId) => jobs.retry(userId, args.job_id)));
+  }, guarded('background_job_retry', ['space:manage'], async (args, userId) => jobs.retry(userId, args.job_id, principal.agentId)));
 
   server.registerTool('audit_list', {
     description: 'List audit events visible to the current user, space administrator, or system administrator.',
@@ -238,7 +242,7 @@ export function createServer(database: Database, principal: Principal, audit: Au
     const systemAdmin = principal.source === 'local' || (principal.source === 'authentik'
       && Boolean((await database.query<{ is_system_admin: boolean }>('SELECT is_system_admin FROM users WHERE id=$1', [userId])).rows[0]?.is_system_admin));
     return audit.list(userId, { spaceId: args.space_id, action: args.action, result: args.result,
-      limit: args.limit, cursor: args.cursor, systemAdmin });
+      limit: args.limit, cursor: args.cursor, systemAdmin, agentId: principal.agentId });
   }));
 
   server.registerTool('space_list', {
@@ -305,23 +309,26 @@ export function createServer(database: Database, principal: Principal, audit: Au
 
   server.registerResource('memory-spaces', 'memory://spaces', {
     title: 'Accessible memory spaces', description: 'Personal and shared spaces visible to this user or Agent.', mimeType: 'application/json'
-  }, async uri => {
+  }, (uri, ctx) => trackOperation(async () => {
+    operationSignal()?.throwIfAborted();
     requireScopes(principal, ['memory:read']);
     const { userId } = await identity;
     return { contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(await spaces.list(userId, principal.agentId), null, 2) }] };
-  });
+  }, undefined, ctx.mcpReq.signal));
 
   server.registerResource('memory-space', new ResourceTemplate('memory://spaces/{spaceId}', {
-    list: async () => {
+    list: ctx => trackOperation(async () => {
+      operationSignal()?.throwIfAborted();
       requireScopes(principal, ['memory:read']);
       const { userId } = await identity;
       return { resources: (await spaces.list(userId, principal.agentId)).map(space => ({
         uri: `memory://spaces/${space.id}`, name: space.name as string, title: space.name as string,
         description: space.description as string, mimeType: 'application/json'
       })) };
-    }
+    }, undefined, ctx.mcpReq.signal)
   }), { title: 'Memory space', description: 'Space metadata and recent active memories.', mimeType: 'application/json' },
-  async (uri, variables) => {
+  (uri, variables, ctx) => trackOperation(async () => {
+    operationSignal()?.throwIfAborted();
     requireScopes(principal, ['memory:read']);
     const spaceId = z.string().uuid().parse(variables.spaceId);
     const { userId } = await identity;
@@ -330,17 +337,18 @@ export function createServer(database: Database, principal: Principal, audit: Au
     if (!visible) throw new Error('Memory space not found or access denied.');
     const recent = await repository.search(userId, spaceId, '', 100);
     return { contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify({ space: visible, memories: recent }, null, 2) }] };
-  });
+  }, undefined, ctx.mcpReq.signal));
 
   server.registerResource('memory-record', new ResourceTemplate('memory://memories/{memoryId}', { list: undefined }), {
     title: 'Memory record', description: 'A single authorized memory with its structured metadata.', mimeType: 'application/json'
-  }, async (uri, variables) => {
+  }, (uri, variables, ctx) => trackOperation(async () => {
+    operationSignal()?.throwIfAborted();
     requireScopes(principal, ['memory:read']);
     const memoryId = z.string().uuid().parse(variables.memoryId);
     const { userId } = await identity;
     const spaceId = await repository.spaceForMemory(userId, memoryId);
     await requireAgentSpaceScope(database, principal.agentId, spaceId, 'memory:read');
     return { contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(await repository.get(userId, memoryId), null, 2) }] };
-  });
+  }, undefined, ctx.mcpReq.signal));
   return server;
 }
