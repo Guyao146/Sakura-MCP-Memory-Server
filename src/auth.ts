@@ -1,6 +1,7 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { AppConfig, Scope } from './config.js';
+import { oidcSubject } from './security/oidc.js';
 import type { Database } from './database.js';
 
 export interface Principal {
@@ -61,7 +62,7 @@ export class AuthService {
     const rawScopes = payload[this.config.authentik.scopeClaim];
     const scopes = Array.isArray(rawScopes) ? rawScopes : typeof rawScopes === 'string' ? rawScopes.split(' ') : [];
     return {
-      id: subject,
+      id: oidcSubject('authentik', this.config.authentik.issuer, subject),
       source: 'authentik',
       scopes: scopes as Scope[],
       expiresAt: payload.exp,

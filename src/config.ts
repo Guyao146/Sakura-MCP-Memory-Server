@@ -15,6 +15,17 @@ const environmentSchema = z.object({
   AUTHENTIK_AUDIENCE: z.string().optional().or(z.literal('')),
   AUTHENTIK_JWKS_URI: optionalUrl,
   AUTHENTIK_SCOPE_CLAIM: z.string().default('scope'),
+  AUTHENTIK_CLIENT_ID: z.string().optional(),
+  AUTHENTIK_AUTHORIZATION_URL: optionalUrl,
+  AUTHENTIK_TOKEN_URL: optionalUrl,
+  SAKURA_CLIENT_ID: z.string().optional(),
+  SAKURA_AUTHORIZATION_URL: optionalUrl,
+  SAKURA_TOKEN_URL: optionalUrl,
+  SAKURA_END_SESSION_URL: optionalUrl,
+  SAKURA_ISSUER: optionalUrl,
+  SAKURA_AUDIENCE: z.string().optional().or(z.literal('')),
+  SAKURA_JWKS_URI: optionalUrl,
+  SAKURA_SCOPE_CLAIM: z.string().default('groups'),
   LOCAL_LOGIN: z.enum(['true', 'false']).optional().or(z.literal('')),
   LOCAL_ADMIN_USERNAME: z.string().optional().or(z.literal('')),
   LOCAL_ADMIN_PASSWORD: z.string().optional().or(z.literal('')),
@@ -50,14 +61,32 @@ export type Scope =
   | 'space:create' | 'space:manage' | 'member:manage' | 'agent:manage' | 'admin:system';
 
 export interface ApiKeyRecord { id: string; secret: string; scopes: Scope[]; }
+
+/**
+ * A single external OpenID Connect provider used for browser login.
+ *
+ * `authentik` and `sakura` share this configuration shape, but have distinct
+ * identity namespaces, administrator rules, discovery and logout behaviour.
+ * `clientId`, `authorizationUrl` and `tokenUrl` are required for browser login
+ * and can be supplied through environment variables or the setup/admin UI.
+ * Authentik's issuer/audience/JWKS triple alone enables MCP Bearer validation;
+ * Sakura is browser-login only.
+ */
+export interface OidcProviderConfig {
+  issuer: string; audience: string; jwksUri: string; scopeClaim: string;
+  clientId?: string; authorizationUrl?: string; tokenUrl?: string; userinfoUrl?: string; endSessionUrl?: string;
+  groupsClaim?: string; adminGroups?: string[];
+}
+
+/** Named OIDC providers recognized by the login flows, in preference order. */
+export const OIDC_PROVIDERS = ['sakura', 'authentik'] as const;
+export type OidcProvider = typeof OIDC_PROVIDERS[number];
+
 export interface AppConfig {
   publicBaseUrl: string; host: string; port: number; logLevel: string; authEnabled: boolean; apiKeys: ApiKeyRecord[];
-  authentik?: {
-    issuer: string; audience: string; jwksUri: string; scopeClaim: string;
-    clientId?: string; authorizationUrl?: string; tokenUrl?: string; userinfoUrl?: string; endSessionUrl?: string;
-    groupsClaim?: string; adminGroups?: string[];
-  };
-  localLogin: { enabled: boolean; adminUsername?: string; adminPassword?: string };
+  authentik?: OidcProviderConfig;
+  sakura?: OidcProviderConfig;
+  localLogin: { enabled: boolean; explicit?: boolean; adminUsername?: string; adminPassword?: string };
   database: { connectionString: string; host: string; maxConnections: number; autoMigrate: boolean };
   setup: { encryptionKey: string };
   openaiCompatible?: { baseUrl: string; apiKey?: string; chatModel?: string; embeddingModel?: string };
@@ -85,10 +114,15 @@ function parseApiKeys(value: string): ApiKeyRecord[] {
 export function loadConfig(env = process.env): AppConfig {
   const value = environmentSchema.parse(env);
   const authEnabled = value.AUTH !== 'false' && value.auth !== 'false';
-  const oauthValues = [value.AUTHENTIK_ISSUER, value.AUTHENTIK_AUDIENCE, value.AUTHENTIK_JWKS_URI];
-  if (authEnabled && oauthValues.some(Boolean) && !oauthValues.every(Boolean)) {
-    throw new Error('AUTHENTIK_ISSUER, AUTHENTIK_AUDIENCE and AUTHENTIK_JWKS_URI must be configured together.');
+  const authentikValues = [value.AUTHENTIK_ISSUER, value.AUTHENTIK_AUDIENCE, value.AUTHENTIK_JWKS_URI];
+  const sakuraValues = [value.SAKURA_ISSUER, value.SAKURA_AUDIENCE, value.SAKURA_JWKS_URI];
+  const incomplete = (triple: Array<string | undefined>) => triple.some(Boolean) && !triple.every(Boolean);
+  if (authEnabled) {
+    if (incomplete(authentikValues)) throw new Error('AUTHENTIK_ISSUER, AUTHENTIK_AUDIENCE and AUTHENTIK_JWKS_URI must be configured together.');
+    if (incomplete(sakuraValues)) throw new Error('SAKURA_ISSUER, SAKURA_AUDIENCE and SAKURA_JWKS_URI must be configured together.');
   }
+  const authentikConfigured = Boolean(value.AUTHENTIK_ISSUER && value.AUTHENTIK_AUDIENCE && value.AUTHENTIK_JWKS_URI);
+  const sakuraConfigured = Boolean(value.SAKURA_ISSUER && value.SAKURA_AUDIENCE && value.SAKURA_JWKS_URI);
   // Local accounts are the default way to log in without an external OIDC
   // provider; an explicit LOCAL_LOGIN chooses the opposite for mixed setups.
   const localExplicit = value.LOCAL_LOGIN === 'true' ? true : value.LOCAL_LOGIN === 'false' ? false : undefined;
@@ -98,9 +132,15 @@ export function loadConfig(env = process.env): AppConfig {
     publicBaseUrl: value.PUBLIC_BASE_URL.replace(/\/$/, ''), host: value.HOST, port: value.PORT, logLevel: value.LOG_LEVEL,
     authEnabled,
     apiKeys: parseApiKeys(value.MCP_API_KEYS),
-    authentik: authEnabled && oauthValues.every(Boolean) ? { issuer: value.AUTHENTIK_ISSUER!, audience: value.AUTHENTIK_AUDIENCE!, jwksUri: value.AUTHENTIK_JWKS_URI!, scopeClaim: value.AUTHENTIK_SCOPE_CLAIM } : undefined,
+    authentik: authEnabled && authentikConfigured ? { issuer: value.AUTHENTIK_ISSUER!, audience: value.AUTHENTIK_AUDIENCE!, jwksUri: value.AUTHENTIK_JWKS_URI!, scopeClaim: value.AUTHENTIK_SCOPE_CLAIM,
+      clientId: value.AUTHENTIK_CLIENT_ID || undefined, authorizationUrl: value.AUTHENTIK_AUTHORIZATION_URL || undefined,
+      tokenUrl: value.AUTHENTIK_TOKEN_URL || undefined } : undefined,
+    sakura: authEnabled && sakuraConfigured ? { issuer: value.SAKURA_ISSUER!, audience: value.SAKURA_AUDIENCE!, jwksUri: value.SAKURA_JWKS_URI!, scopeClaim: value.SAKURA_SCOPE_CLAIM,
+      clientId: value.SAKURA_CLIENT_ID || undefined, authorizationUrl: value.SAKURA_AUTHORIZATION_URL || undefined,
+      tokenUrl: value.SAKURA_TOKEN_URL || undefined, endSessionUrl: value.SAKURA_END_SESSION_URL || undefined } : undefined,
     localLogin: {
-      enabled: authEnabled && (localExplicit ?? (!oauthValues.every(Boolean) || Boolean(adminUsername))),
+      enabled: authEnabled && (localExplicit ?? (!(authentikConfigured || sakuraConfigured) || Boolean(adminUsername))),
+      ...(localExplicit === undefined ? {} : { explicit: localExplicit }),
       adminUsername, adminPassword
     },
     database: { connectionString: value.DATABASE_URL, host: value.POSTGRES_HOST, maxConnections: value.DATABASE_MAX_CONNECTIONS, autoMigrate: value.AUTO_MIGRATE === 'true' },

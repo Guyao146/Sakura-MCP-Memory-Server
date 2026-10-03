@@ -9,6 +9,17 @@ const base = {
 };
 
 describe('loadConfig', () => {
+  it('loads complete browser environment settings for both providers', () => {
+    const config = loadConfig({ ...base,
+      AUTHENTIK_ISSUER: 'https://authentik.example', AUTHENTIK_AUDIENCE: 'mcp', AUTHENTIK_JWKS_URI: 'https://authentik.example/jwks',
+      AUTHENTIK_CLIENT_ID: 'ak-client', AUTHENTIK_AUTHORIZATION_URL: 'https://authentik.example/authorize', AUTHENTIK_TOKEN_URL: 'https://authentik.example/token',
+      SAKURA_ISSUER: 'https://sakura.example', SAKURA_AUDIENCE: 'sk-client', SAKURA_JWKS_URI: 'https://sakura.example/jwks.json',
+      SAKURA_CLIENT_ID: 'sk-client', SAKURA_AUTHORIZATION_URL: 'https://sakura.example/authorize', SAKURA_TOKEN_URL: 'https://sakura.example/token',
+      SAKURA_END_SESSION_URL: 'https://sakura.example/logout' });
+    expect(config.authentik).toMatchObject({ clientId: 'ak-client', authorizationUrl: 'https://authentik.example/authorize', tokenUrl: 'https://authentik.example/token' });
+    expect(config.sakura).toMatchObject({ clientId: 'sk-client', authorizationUrl: 'https://sakura.example/authorize', tokenUrl: 'https://sakura.example/token', endSessionUrl: 'https://sakura.example/logout' });
+  });
+
   it('parses API key scopes and normalizes public URL', () => {
     const config = loadConfig({ ...base, PUBLIC_BASE_URL: 'https://mcp.example.com/' });
     expect(config.publicBaseUrl).toBe('https://mcp.example.com');
@@ -73,5 +84,26 @@ describe('loadConfig', () => {
     const config = loadConfig({ ...base, auth: 'false', AUTHENTIK_ISSUER: 'https://login.example.com/app' });
     expect(config.authEnabled).toBe(false);
     expect(config.authentik).toBeUndefined();
+  });
+
+  it('parses Sakura provider settings independently from Authentik', () => {
+    const sakura = { SAKURA_ISSUER: 'https://sakura.example.com', SAKURA_AUDIENCE: 'sakura-mcp', SAKURA_JWKS_URI: 'https://sakura.example.com/jwks' };
+    // Sakura is optional: leaving it out keeps an Authentik installation unchanged.
+    const authentik = { AUTHENTIK_ISSUER: 'https://login.example.com/app', AUTHENTIK_AUDIENCE: 'mcp', AUTHENTIK_JWKS_URI: 'https://login.example.com/jwks/' };
+    expect(loadConfig({ ...base, ...authentik }).sakura).toBeUndefined();
+    // Both providers can coexist, each with its own issuer and audience.
+    const both = loadConfig({ ...base, ...authentik, ...sakura });
+    expect(both.authentik).toMatchObject({ issuer: 'https://login.example.com/app', audience: 'mcp' });
+    expect(both.sakura).toMatchObject({ issuer: 'https://sakura.example.com', audience: 'sakura-mcp' });
+    expect(both.localLogin.enabled).toBe(false);
+    // Sakura alone still counts as an external provider, so local accounts stay off.
+    expect(loadConfig({ ...base, ...sakura }).localLogin.enabled).toBe(false);
+    expect(loadConfig({ ...base, ...sakura, LOCAL_LOGIN: 'true' }).localLogin.enabled).toBe(true);
+  });
+
+  it('rejects incomplete Sakura configuration', () => {
+    expect(() => loadConfig({ ...base, SAKURA_ISSUER: 'https://sakura.example.com' })).toThrow('SAKURA_ISSUER');
+    // Incomplete Sakura variables are ignored entirely when authentication is off.
+    expect(loadConfig({ ...base, auth: 'false', SAKURA_ISSUER: 'https://sakura.example.com' }).sakura).toBeUndefined();
   });
 });

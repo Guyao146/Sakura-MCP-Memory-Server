@@ -11,6 +11,7 @@ import { ClientSessionRepository } from './clients/repository.js';
 import { isWriteTool, readMcpFacts } from './clients/facts.js';
 import type { ClientIdentity } from './clients/types.js';
 import { loadConfig } from './config.js';
+import type { OidcProvider } from './config.js';
 import { Database } from './database.js';
 import { MemoryRepository } from './memory/repository.js';
 import { SpaceRepository } from './spaces/repository.js';
@@ -21,10 +22,10 @@ import { JobRepository } from './jobs/repository.js';
 import { BackgroundWorker } from './jobs/worker.js';
 import { createServer } from './tools.js';
 import { setupPage, setupScript } from './setup/page.js';
-import { authentikConfigSchema, authentikDiscoveryInputSchema, SetupService, setupInputSchema } from './setup/service.js';
+import { authentikConfigSchema, authentikDiscoveryInputSchema, sakuraConfigSchema, sakuraDiscoveryInputSchema, SetupService, setupInputSchema } from './setup/service.js';
 import { SettingsRepository } from './settings/repository.js';
-import { WebSessionService } from './web/session.js';
-import type { WebIdentity } from './web/session.js';
+import { WebSessionService, primaryOidcProvider, browserLoginConfigured, SILENT_PROBE_PROVIDERS } from './web/session.js';
+import type { WebIdentity, WebAuthSource } from './web/session.js';
 import { adminPage } from './web/admin-page.js';
 import { localLoginPage, loginPage } from './web/login-page.js';
 import { LocalLoginService } from './web/local-login.js';
@@ -111,12 +112,29 @@ app.post('/api/setup/discover-authentik', async context => {
       error_description: error instanceof Error ? error.message : 'Authentik discovery failed.' }, 400);
   }
 });
+app.post('/api/setup/discover-sakura', async context => {
+  try {
+    const body = sakuraDiscoveryInputSchema.parse(await context.req.json());
+    return context.json(await setup.discoverSakura(body));
+  } catch (error) {
+    return context.json({ error: 'sakura_discovery_failed',
+      error_description: error instanceof Error ? error.message : 'Sakura discovery failed.' }, 400);
+  }
+});
 app.post('/api/setup/test-authentik', async context => {
   try {
     if (!baseConfig.authEnabled) return context.json({ status: 'skipped', authEnabled: false });
     const body = setupInputSchema.pick({ authentik: true }).parse(await context.req.json());
     if (!body.authentik) throw new Error('Authentik configuration is required.');
     return context.json(await setup.testAuthentik(body.authentik));
+  } catch (error) { return context.json({ error: 'validation_failed', error_description: error instanceof Error ? error.message : 'Validation failed.' }, 400); }
+});
+app.post('/api/setup/test-sakura', async context => {
+  try {
+    if (!baseConfig.authEnabled) return context.json({ status: 'skipped', authEnabled: false });
+    const body = setupInputSchema.pick({ sakura: true }).parse(await context.req.json());
+    if (!body.sakura) throw new Error('Sakura configuration is required.');
+    return context.json(await setup.testSakura(body.sakura));
   } catch (error) { return context.json({ error: 'validation_failed', error_description: error instanceof Error ? error.message : 'Validation failed.' }, 400); }
 });
 app.post('/api/setup/test-provider', async context => {
@@ -128,6 +146,9 @@ app.post('/api/setup/test-provider', async context => {
 app.post('/api/setup/complete', async context => {
   try {
     const body = setupInputSchema.parse(await context.req.json());
+    if (baseConfig.authEnabled && body.localAdmin && baseConfig.localLogin.explicit === false) {
+      throw new Error('LOCAL_LOGIN=false 已禁用本地登录，请先启用后再创建本地管理员。');
+    }
     await setup.complete(body);
     config = await settings.apply(baseConfig);
     auth = new AuthService(config, database);
@@ -142,17 +163,22 @@ app.post('/api/setup/complete', async context => {
 app.get('/auth/login', async context => {
   if (!(await settings.installation()).completed) return context.redirect('/setup');
   if (!config.authEnabled) return context.redirect('/admin');
+  const primary = primaryOidcProvider(config);
   // No external OIDC provider: the local username/password page is the only way in.
-  if (!config.authentik) {
+  if (!primary) {
     if (config.localLogin.enabled) return context.html(localLoginPage);
-    return context.json({ error: 'auth_misconfigured', error_description: 'No login method is configured. Set AUTHENTIK_* or enable LOCAL_LOGIN.' }, 500);
+    return context.json({ error: 'auth_misconfigured', error_description: 'No login method is configured. Set AUTHENTIK_*, SAKURA_* or enable LOCAL_LOGIN.' }, 500);
   }
   // Probe once per visit. `probed=1` marks the round trip as done so a provider
-  // error can never bounce the visitor between here and Authentik forever.
-  if (context.req.query('probed') !== '1' && !context.req.query('reason')) {
+  // error can never bounce the visitor between here and the provider forever.
+  // Only a provider that answers `prompt=none` with a standard error can be
+  // probed; SakuraID would render its own login page instead of answering, so
+  // it is reached through a plain link on the login page.
+  if (context.req.query('probed') !== '1' && !context.req.query('reason') && !config.localLogin.enabled
+    && !browserLoginConfigured(config, 'sakura') && SILENT_PROBE_PROVIDERS.includes(primary)) {
     const returnTo = context.req.query('return_to') ?? '/admin';
     try {
-      const attempt = await webSessions.begin(returnTo, 'probe');
+      const attempt = await webSessions.begin(returnTo, 'probe', primary);
       context.header('Set-Cookie', attempt.cookie);
       return context.redirect(attempt.url);
     }
@@ -163,12 +189,21 @@ app.get('/auth/login', async context => {
 app.get('/auth/start', async context => {
   if (!(await settings.installation()).completed) return context.redirect('/setup');
   if (!config.authEnabled) return context.redirect('/admin');
+  const requested = context.req.query('provider');
+  const primary = primaryOidcProvider(config);
+  if (requested !== undefined && (requested !== 'authentik' && requested !== 'sakura'
+    || !browserLoginConfigured(config, requested as OidcProvider))) {
+    return context.json({ error: 'provider_unavailable', error_description: '所选登录方式未配置或不可用。' }, 400);
+  }
+  const provider = requested as OidcProvider | undefined ?? primary;
+  if (!provider) return context.json({ error: 'provider_unavailable' }, 400);
   try {
-    const { url, cookie } = await webSessions.begin(context.req.query('return_to') ?? '/admin');
+    const { url, cookie } = await webSessions.begin(context.req.query('return_to') ?? '/admin', 'login', provider);
     context.header('Set-Cookie', cookie);
     // "Sign in as someone else" must reach the account picker even though an SSO
-    // session exists, so forward the intent to Authentik.
-    const target = context.req.query('switch') === '1'
+    // session exists, so forward the intent to the provider; only Authentik
+    // promises to honour an account-selection prompt.
+    const target = context.req.query('switch') === '1' && provider === 'authentik'
       ? (() => { const u = new URL(url); u.searchParams.set('prompt', 'select_account'); return u.toString(); })()
       : url;
     context.header('Set-Cookie', webSessions.clearProbeHintCookie(), { append: true });
@@ -184,7 +219,16 @@ app.get('/auth/local-login', async context => {
 });
 
 /** Public metadata only: which login methods this installation accepts. */
-app.get('/auth/modes', async context => context.json({ oidc: Boolean(config.authentik), local: config.localLogin.enabled }));
+app.get('/auth/modes', async context => context.json({
+  // `oidc`/`provider` describe the login page's primary path: the first
+  // configured provider. `authentik`/`sakura` tell the page which individual
+  // providers are available, so it can offer every configured method.
+  oidc: primaryOidcProvider(config) !== undefined,
+  provider: primaryOidcProvider(config) ?? null,
+  authentik: browserLoginConfigured(config, 'authentik'),
+  sakura: browserLoginConfigured(config, 'sakura'),
+  local: config.localLogin.enabled
+}));
 
 const localLoginInputSchema = z.object({
   username: z.string().min(3).max(60), password: z.string().min(1).max(200), return_to: z.string().max(500).optional()
@@ -198,7 +242,7 @@ app.post('/auth/local', async context => {
     if (!(await settings.installation()).completed) throw new Error('安装尚未完成，请先访问 /setup。');
     const body = localLoginInputSchema.parse(await context.req.json());
     const account = await localLogins.login(body.username, body.password);
-    const session = await webSessions.issueSession(account.userId, body.return_to ?? '/admin', 'local');
+    const session = await webSessions.issueSession(account.userId, body.return_to ?? '/admin', 'local', account.credentialVersion);
     await audit.record({ actorUserId: account.userId, authSource: 'local', action: 'auth.login', result: 'success',
       metadata: { username: account.username } });
     context.header('Set-Cookie', webSessions.cookie(session.token));
@@ -244,10 +288,10 @@ app.get('/auth/callback', async context => {
     // deletion. Append the second Set-Cookie instead of replacing the session.
     context.header('Set-Cookie', webSessions.clearProbeHintCookie(), { append: true });
     const identity = await webSessions.authenticate(result.token);
-    await audit.record({ actorUserId: identity.userId, authSource: 'authentik', action: 'auth.login', result: 'success' });
+    await audit.record({ actorUserId: identity.userId, authSource: result.authSource, action: 'auth.login', result: 'success' });
     return context.redirect(result.returnTo);
   } catch (error) {
-    await audit.record({ authSource: 'authentik', action: 'auth.login', result: 'error', metadata: { message: error instanceof Error ? error.message : 'OIDC callback failed.' } });
+    await audit.record({ action: 'auth.login', result: 'error', metadata: { message: error instanceof Error ? error.message : 'OIDC callback failed.' } });
     return context.json({ error: 'callback_failed', error_description: error instanceof Error ? error.message : 'OIDC callback failed.' }, 401);
   }
 });
@@ -263,7 +307,7 @@ app.post('/auth/logout', async context => {
     await webSessions.logout(token);
     await audit.record({ actorUserId: identity.userId, authSource: identity.authSource, action: 'auth.logout', result: 'success' });
     context.header('Set-Cookie', webSessions.clearCookie());
-    return context.json({ loggedOut: true, redirectTo: webSessions.endSessionUrl() ?? '/auth/login?reason=logged_out' });
+    return context.json({ loggedOut: true, redirectTo: webSessions.endSessionUrl('/auth/login', identity.authSource) ?? '/auth/login?reason=logged_out' });
   } catch (error) {
     return context.json({ error: 'unauthorized', error_description: error instanceof Error ? error.message : 'Unauthorized.' }, 401);
   }
@@ -277,13 +321,31 @@ app.get('/api/me', async context => {
   } catch (error) { return context.json({ error: 'unauthorized', error_description: error instanceof Error ? error.message : 'Unauthorized.' }, 401); }
 });
 app.post('/api/me/password', async context => adminApi(context, true, async identity => {
-  if (!config.localLogin.enabled) throw new Error('本地登录未启用。');
+  if (!config.authEnabled || !config.localLogin.enabled || identity.authSource !== 'local') throw new Error('请使用本地账号登录后修改密码。');
   const body = z.object({
-    currentPassword: z.string().min(1).max(500),
+    currentPassword: z.string().min(1).max(200),
     newPassword: z.string().min(8).max(200)
   }).parse(await context.req.json());
   await localLogins.changePassword(identity.userId, body.currentPassword, body.newPassword);
-  return { changed: true };
+  context.header('Set-Cookie', webSessions.clearCookie());
+  return { changed: true, redirectTo: '/auth/local-login' };
+}));
+app.get('/api/me/sessions', async context => adminApi(context, false, async identity => {
+  if (!config.authEnabled) throw new Error('AUTH=false 下没有登录会话。');
+  return { sessions: await webSessions.listSessions(identity) };
+}));
+app.post('/api/me/sessions/revoke-others', async context => adminApi(context, true, async identity => {
+  if (!config.authEnabled) throw new Error('AUTH=false 下没有登录会话。');
+  await webSessions.revokeOtherSessions(identity);
+  return { revoked: true };
+}));
+app.delete('/api/me/sessions/:id', async context => adminApi(context, true, async identity => {
+  if (!config.authEnabled) throw new Error('AUTH=false 下没有登录会话。');
+  const id = z.string().uuid().parse(context.req.param('id'));
+  await webSessions.revokeSession(identity, id);
+  const current = id === identity.sessionId;
+  if (current) context.header('Set-Cookie', webSessions.clearCookie());
+  return { revoked: true, redirectTo: current ? '/auth/login' : undefined };
 }));
 app.get('/admin', async context => {
   if (!(await settings.installation()).completed) return context.redirect('/setup');
@@ -306,8 +368,8 @@ const agentScopeSchema = z.array(z.enum([
 
 app.get('/api/admin/bootstrap', async context => adminApi(context, false, async identity => ({
   csrf: webSessions.csrf(identity),
-  version: APP_VERSION, authEnabled: config.authEnabled,
-  me: { id: identity.userId, email: identity.email, displayName: identity.displayName, isSystemAdmin: identity.isSystemAdmin },
+  version: APP_VERSION, authEnabled: config.authEnabled, localLogin: config.localLogin.enabled,
+  me: { id: identity.userId, email: identity.email, displayName: identity.displayName, isSystemAdmin: identity.isSystemAdmin, authSource: identity.authSource },
   spaces: await spaces.list(identity.userId), agents: await agents.list(identity.userId)
 })));
 app.get('/api/admin/version', async context => adminApi(context, false, async identity => {
@@ -466,6 +528,20 @@ app.put('/api/admin/authentik', async context => adminApi(context, true, async i
     restartRequired: !baseConfig.authEnabled, message: baseConfig.authEnabled
       ? 'Authentik 配置已保存并立即生效。' : 'Authentik 配置已保存。请将 AUTH 恢复为 true 并重启应用。' };
 }));
+app.get('/api/admin/sakura', async context => adminApi(context, false, async identity => {
+  if (!identity.isSystemAdmin) throw new Error('System administrator permission is required.');
+  const stored = await settings.get<NonNullable<typeof config.sakura>>('sakura');
+  return { authEnabled: config.authEnabled, configured: Boolean(stored ?? config.sakura), sakura: stored ?? config.sakura ?? null };
+}));
+app.put('/api/admin/sakura', async context => adminApi(context, true, async identity => {
+  if (!identity.isSystemAdmin) throw new Error('System administrator permission is required.');
+  const body = z.object({ sakura: sakuraConfigSchema }).parse(await context.req.json());
+  const validation = await setup.testSakura(body.sakura);
+  await settings.saveSakura(body.sakura);
+  config = await settings.apply(baseConfig);
+  return { saved: true, publicClient: validation.publicClient, restartRequired: !baseConfig.authEnabled,
+    message: baseConfig.authEnabled ? 'Sakura 配置已保存并立即生效。' : 'Sakura 配置已保存。请将 AUTH 恢复为 true 并重启应用。' };
+}));
 app.get('/api/admin/local-users', async context => adminApi(context, false, async identity => {
   if (!identity.isSystemAdmin) throw new Error('System administrator permission is required.');
   return { users: await localLogins.list() };
@@ -482,13 +558,25 @@ app.post('/api/admin/local-users', async context => adminApi(context, true, asyn
   }).parse(await context.req.json());
   const account = await localLogins.upsert(body.username, body.password, {
     displayName: body.displayName, email: body.email, isSystemAdmin: body.isSystemAdmin ?? false
-  });
+  }, true);
   return { saved: true, userId: account.userId };
 }));
 app.put('/api/admin/local-users/:username', async context => adminApi(context, true, async identity => {
   if (!identity.isSystemAdmin) throw new Error('System administrator permission is required.');
   const body = z.object({ password: z.string().min(8).max(200) }).parse(await context.req.json());
   await localLogins.setPassword(context.req.param('username'), body.password);
+  return { saved: true };
+}));
+app.patch('/api/admin/local-users/:username', async context => adminApi(context, true, async identity => {
+  if (!identity.isSystemAdmin) throw new Error('System administrator permission is required.');
+  const body = z.object({ displayName: z.string().min(1).max(120).optional(),
+    email: z.email().nullable().optional(), isSystemAdmin: z.boolean().optional() }).parse(await context.req.json());
+  await localLogins.updateProfile(context.req.param('username'), body);
+  return { saved: true };
+}));
+app.post('/api/admin/local-users/:username/unlock', async context => adminApi(context, true, async identity => {
+  if (!identity.isSystemAdmin) throw new Error('System administrator permission is required.');
+  await localLogins.unlock(context.req.param('username'));
   return { saved: true };
 }));
 app.delete('/api/admin/local-users/:username', async context => adminApi(context, true, async identity => {
@@ -536,12 +624,15 @@ app.get('/health', async context => {
   }
 });
 app.get('/.well-known/oauth-protected-resource', context => {
-  if (!config.authentik) return context.json({ error: 'Authentik OAuth is not configured.' }, 404);
-  return context.json({ resource: config.publicBaseUrl, authorization_servers: [config.authentik.issuer] });
+  // Sakura is a browser IdP only; its access tokens do not carry MCP scopes.
+  const issuers = config.authEnabled && config.authentik ? [config.authentik.issuer] : [];
+  if (!issuers.length) return context.json({ error: 'OAuth is not configured.' }, 404);
+  return context.json({ resource: config.publicBaseUrl, authorization_servers: issuers });
 });
 app.get('/.well-known/oauth-protected-resource/mcp', context => {
-  if (!config.authentik) return context.json({ error: 'Authentik OAuth is not configured.' }, 404);
-  return context.json({ resource: `${config.publicBaseUrl}/mcp`, authorization_servers: [config.authentik.issuer] });
+  const issuers = config.authEnabled && config.authentik ? [config.authentik.issuer] : [];
+  if (!issuers.length) return context.json({ error: 'OAuth is not configured.' }, 404);
+  return context.json({ resource: `${config.publicBaseUrl}/mcp`, authorization_servers: issuers });
 });
 app.all('/mcp', handleMcp);
 
@@ -683,4 +774,4 @@ function auditUuid(value: unknown): string | undefined {
   return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value) ? value : undefined;
 }
 
-function webAuthSource(identity: WebIdentity): 'authentik' | 'local' { return identity.authSource; }
+function webAuthSource(identity: WebIdentity): WebAuthSource { return identity.authSource; }

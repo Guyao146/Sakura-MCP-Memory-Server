@@ -16,6 +16,7 @@ export function createHttpApp(config: AppConfig) {
   app.use('/auth/*', limiter.middleware('auth', config.security.authPerMinute, config.security.trustProxy));
   app.use('/api/setup/*', limiter.middleware('setup', config.security.setupPerMinute, config.security.trustProxy));
   app.use('/api/admin/*', limiter.middleware('web', config.security.webPerMinute, config.security.trustProxy));
+  app.use('/api/me/*', limiter.middleware('account', config.security.authPerMinute, config.security.trustProxy));
   app.use('*', boundedBody(config.security.maxBodyBytes));
   return app;
 }

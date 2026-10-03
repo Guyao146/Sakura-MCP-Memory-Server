@@ -161,6 +161,119 @@ describe('installation security', () => {
       .rejects.toThrow('slug');
   });
 
+  it('discovers Sakura endpoints from the standard discovery document', async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      issuer: 'https://sakura.example.com',
+      authorization_endpoint: 'https://sakura.example.com/authorize',
+      token_endpoint: 'https://sakura.example.com/token',
+      jwks_uri: 'https://sakura.example.com/jwks',
+      userinfo_endpoint: 'https://sakura.example.com/userinfo',
+      end_session_endpoint: 'https://sakura.example.com/logout'
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetcher);
+    const service = new SetupService(true, 'https://mcp.example.com', {} as never, {} as never);
+    await expect(service.discoverSakura({ baseUrl: 'https://sakura.example.com' }))
+      .resolves.toMatchObject({
+        issuer: 'https://sakura.example.com', jwksUri: 'https://sakura.example.com/jwks',
+        authorizationUrl: 'https://sakura.example.com/authorize', tokenUrl: 'https://sakura.example.com/token',
+        userinfoUrl: 'https://sakura.example.com/userinfo', endSessionUrl: 'https://sakura.example.com/logout'
+      });
+    expect(fetcher).toHaveBeenCalledWith(
+      new URL('https://sakura.example.com/.well-known/openid-configuration'),
+      expect.objectContaining({ redirect: 'error', headers: { Accept: 'application/json' } })
+    );
+  });
+
+  it('rejects unsafe and disabled Sakura discovery', async () => {
+    const enabled = new SetupService(true, 'https://mcp.example.com', {} as never, {} as never);
+    await expect(enabled.discoverSakura({ baseUrl: 'file:///etc/passwd' })).rejects.toThrow('HTTP(S) origin');
+    await expect(enabled.discoverSakura({ baseUrl: 'https://sakura.example.com/path' })).rejects.toThrow('HTTP(S) origin');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      issuer: 'https://evil.example.com',
+      authorization_endpoint: 'https://sakura.example.com/authorize',
+      token_endpoint: 'https://sakura.example.com/token',
+      jwks_uri: 'https://sakura.example.com/jwks'
+    }), { status: 200 })));
+    await expect(enabled.discoverSakura({ baseUrl: 'https://sakura.example.com' })).rejects.toThrow('cross-origin');
+    // An HTTPS address must not be downgraded to HTTP endpoints.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      issuer: 'http://sakura.example.com',
+      authorization_endpoint: 'http://sakura.example.com/authorize',
+      token_endpoint: 'http://sakura.example.com/token',
+      jwks_uri: 'http://sakura.example.com/jwks'
+    }), { status: 200 })));
+    // The origin comparison includes the protocol, so an HTTPS base address can
+    // never be answered with downgraded HTTP endpoints.
+    await expect(enabled.discoverSakura({ baseUrl: 'https://sakura.example.com' })).rejects.toThrow('cross-origin');
+    await expect(new SetupService(false, 'https://mcp.example.com', {} as never, {} as never)
+      .discoverSakura({ baseUrl: 'https://sakura.example.com' })).rejects.toThrow('AUTH=false');
+  });
+
+  it('validates a Sakura provider through the shared OIDC test path', async () => {
+    const sakura = {
+      issuer: 'https://sakura.example.com', audience: 'sakura-mcp',
+      jwksUri: 'https://sakura.example.com/jwks', scopeClaim: 'groups', clientId: 'sakura-public',
+      authorizationUrl: 'https://sakura.example.com/authorize', tokenUrl: 'https://sakura.example.com/token'
+    };
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ issuer: sakura.issuer,
+        authorization_endpoint: sakura.authorizationUrl, token_endpoint: sakura.tokenUrl }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ keys: [{ kty: 'RSA', kid: 'sakura' }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 }));
+    vi.stubGlobal('fetch', fetcher);
+    const service = new SetupService(true, 'https://mcp.example.com', {} as never, {} as never);
+    await expect(service.testSakura(sakura)).resolves.toMatchObject({ publicClient: true, signingKeys: 1 });
+    // The preflight exchanges against the Sakura token endpoint with PKCE.
+    const tokenCall = fetcher.mock.calls[2];
+    expect(tokenCall[0]).toBe(sakura.tokenUrl);
+    expect((tokenCall[1]?.body as URLSearchParams).get('client_id')).toBe('sakura-public');
+  });
+
+  it('completes installation with Sakura in place of Authentik', async () => {
+    // `complete` validates the provider before writing anything, so the
+    // discovery document, JWKS and Public Client preflight all need answers.
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ issuer: 'https://sakura.example.com',
+        authorization_endpoint: 'https://sakura.example.com/authorize',
+        token_endpoint: 'https://sakura.example.com/token' }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ keys: [{ kty: 'RSA', kid: 'sakura' }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 })));
+    let saved: unknown;
+    const settings = { complete: async (input: unknown) => { saved = input; } };
+    const service = new SetupService(true, 'https://mcp.example.com', {} as never, settings as never);
+    await service.complete({
+      administratorEmail: 'admin@example.com',
+      sakura: {
+        issuer: 'https://sakura.example.com', audience: 'sakura-mcp', jwksUri: 'https://sakura.example.com/jwks',
+        scopeClaim: 'groups', clientId: 'sakura-public', adminGroups: ['MCP Admins'],
+        authorizationUrl: 'https://sakura.example.com/authorize', tokenUrl: 'https://sakura.example.com/token'
+      }
+    });
+    expect(saved).toMatchObject({ administratorEmail: 'admin@example.com',
+      sakura: { issuer: 'https://sakura.example.com', clientId: 'sakura-public' } });
+  });
+
+  it('rejects untrusted Sakura endpoint configurations before token exchange', async () => {
+    const provider = { issuer: 'https://sakura.example', audience: 'client', clientId: 'client',
+      jwksUri: 'https://sakura.example/jwks.json', authorizationUrl: 'https://sakura.example/authorize',
+      tokenUrl: 'https://sakura.example/token', scopeClaim: 'groups', groupsClaim: 'groups' };
+    const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
+    const service = new SetupService(true, 'https://mcp.example.com', {} as never, {} as never);
+    await expect(service.testSakura({ ...provider, tokenUrl: 'https://other.example/token' })).rejects.toThrow('origin');
+    await expect(service.testSakura({ ...provider, tokenUrl: 'https://user:pass@sakura.example/token' })).rejects.toThrow();
+    expect(fetcher).not.toHaveBeenCalled();
+    for (const metadata of [
+      { issuer: 'https://wrong.example', authorization_endpoint: provider.authorizationUrl, token_endpoint: provider.tokenUrl },
+      { issuer: provider.issuer, authorization_endpoint: provider.authorizationUrl, token_endpoint: 'https://sakura.example/wrong' },
+      { issuer: provider.issuer, authorization_endpoint: provider.authorizationUrl, token_endpoint: provider.tokenUrl, jwks_uri: 'https://sakura.example/wrong' }
+    ]) {
+      fetcher.mockReset().mockResolvedValueOnce(Response.json(metadata));
+      await expect(service.testSakura(provider)).rejects.toThrow(/match/);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(fetcher.mock.calls[0][1].redirect).toBe('error');
+    }
+  });
+
   it('accepts only a Public Client during Authentik preflight', async () => {
     const authentik = {
       issuer: 'https://login.example.com/application/o/sakura/', audience: 'https://mcp.example.com',
@@ -205,10 +318,28 @@ describe('installation security', () => {
       authorizationUrl: 'https://login.example.com/authorize', tokenUrl: 'https://login.example.com/token' };
     await repository.saveAuthentik(value, 'Admin@Example.com');
     expect(client.query).toHaveBeenCalledWith('BEGIN');
-    expect(client.query).toHaveBeenCalledWith(expect.stringContaining("VALUES('authentik',$1,false)"), [value]);
+    // The provider key is a parameter now that the same transactional writer
+    // serves both Authentik and Sakura, not a hardcoded literal.
+    expect(client.query).toHaveBeenCalledWith(expect.stringContaining('VALUES($1,$2,false)'), ['authentik', value]);
     expect(client.query).toHaveBeenCalledWith(expect.stringContaining('system_admin_allowlist'), ['Admin@Example.com']);
     expect(client.query).toHaveBeenCalledWith('COMMIT');
     expect(client.release).toHaveBeenCalled();
+  });
+
+  it('saves Sakura provider configuration without changing the primary administrator', async () => {
+    const client = { release: vi.fn(), query: vi.fn().mockResolvedValue({ rows: [] }) };
+    const database = { pool: { connect: vi.fn().mockResolvedValue(client) } };
+    const repository = new SettingsRepository(database as never, key);
+    const value = { issuer: 'https://sakura.example.com', audience: 'sakura-mcp',
+      jwksUri: 'https://sakura.example.com/jwks', scopeClaim: 'groups', clientId: 'sakura-client',
+      authorizationUrl: 'https://sakura.example.com/authorize', tokenUrl: 'https://sakura.example.com/token' };
+    await repository.saveSakura(value);
+    expect(client.query).toHaveBeenCalledWith(expect.stringContaining('VALUES($1,$2,false)'), ['sakura', value]);
+    // Sakura is an optional second provider, so it must not rewrite the
+    // installation's administrator email or the allowlist.
+    expect(client.query).not.toHaveBeenCalledWith(expect.stringContaining('system_admin_allowlist'), expect.anything());
+    expect(client.query).not.toHaveBeenCalledWith(expect.stringContaining('installation_state'), expect.anything());
+    expect(client.query).toHaveBeenCalledWith('COMMIT');
   });
 
   it('does not enable stored Authentik configuration while AUTH=false', async () => {

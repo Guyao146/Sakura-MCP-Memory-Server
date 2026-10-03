@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { loadConfig } from '../src/config.js';
 import { adminPage } from '../src/web/admin-page.js';
 import { loginPage, localLoginPage } from '../src/web/login-page.js';
-import { adminByGroup, DEFAULT_ADMIN_GROUPS, describeTokenExchangeFailure, WebSessionService, type WebIdentity } from '../src/web/session.js';
+import { adminByGroup, DEFAULT_ADMIN_GROUPS, describeTokenExchangeFailure, primaryOidcProvider, WebSessionService, type WebIdentity } from '../src/web/session.js';
 
 const indexSource = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
 
@@ -58,15 +58,15 @@ describe('Web management security', () => {
   it('issues sessions for any login method with the auth source recorded', async () => {
     const calls: Array<{ text: string; values: unknown[] }> = [];
     const database = {
-      query: async (text: string, values: unknown[]) => { calls.push({ text, values }); return { rows: [] }; }
+      query: async (text: string, values: unknown[]) => { calls.push({ text, values }); return { rows: [{ id: 'session' }] }; }
     };
     const service = new WebSessionService(database as never, () => config);
-    const local = await service.issueSession('user-2', '/admin', 'local');
+    const local = await service.issueSession('user-2', '/admin', 'local', 'version');
     expect(local.token.startsWith('sess_')).toBe(true);
     expect(local.returnTo).toBe('/admin');
     expect(calls[0].text).toContain('auth_source');
-    expect(calls[0].values).toEqual(['user-2', expect.any(String), 'local']);
-    const safe = await service.issueSession('user-2', '//evil.example.com/path', 'local');
+    expect(calls[0].values).toEqual(['user-2', expect.any(String), 'local', 'version']);
+    const safe = await service.issueSession('user-2', '//evil.example.com/path', 'local', 'version');
     expect(safe.returnTo).toBe('/admin');
   });
 
@@ -123,9 +123,9 @@ describe('Web management security', () => {
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({}) };
     const database = { pool: { connect: vi.fn().mockResolvedValue(client) }, query: vi.fn().mockResolvedValue({ rows: [] }) };
-    const disabled = loadConfig({ ...config as never, PUBLIC_BASE_URL: config.publicBaseUrl,
+    const disabled = loadConfig({ PUBLIC_BASE_URL: config.publicBaseUrl,
       DATABASE_URL: config.database.connectionString, CONFIG_ENCRYPTION_KEY: config.setup.encryptionKey,
-      MCP_API_KEYS: '', AUTH: 'false' } as never);
+      MCP_API_KEYS: '', AUTH: 'false' });
     const service = new WebSessionService(database as never, () => disabled);
     const first = await service.localIdentity();
     const second = await service.localIdentity();
@@ -164,7 +164,7 @@ describe('Web management security', () => {
   });
 
   it('renders a branded login landing page that never auto-starts the OIDC redirect', () => {
-    for (const marker of ['使用 Authentik 登录', '本站使用 Authentik 单点登录', '/auth/start', 'id="notice"']) {
+    for (const marker of ['本地账号登录', '本地账号、Sakura 或 Authentik', '/auth/start', 'id="notice"']) {
       expect(loginPage).toContain(marker);
     }
     expect(loginPage).not.toContain('${');
@@ -223,7 +223,10 @@ describe('Web management security', () => {
     expect(localLoginPage).toContain("$('notice').textContent=");
     // The OIDC path is only offered when the installation actually has one.
     expect(localLoginPage).toContain("fetch('/auth/modes')");
-    expect(localLoginPage).toContain("if(d&&d.oidc)");
+    // Every configured provider is offered next to the local form; the response
+    // only switches the links on, never supplies their text.
+    expect(localLoginPage).toContain("['sakura','authentik'].forEach");
+    expect(localLoginPage).toContain("a.textContent='使用 '+names[name]+' 登录'");
     const script = localLoginPage.match(/<script>([\s\S]*?)<\/script>/g)?.pop()?.replace(/<\/?script>/g, '');
     expect(script).toBeTruthy();
     expect(() => new Script(script!)).not.toThrow();
@@ -261,6 +264,61 @@ describe('Web management security', () => {
     expect(adminByGroup({}, { ...auth, adminGroups: ['Sakura Admins'] })).toBeUndefined();
     expect(adminByGroup({ groups: [42] }, { ...auth, adminGroups: ['Sakura Admins'] })).toBe(false);
     expect(adminByGroup({ groups: [42] }, auth)).toBeUndefined();
+  });
+
+  it('never guesses a SakuraID administrator group', () => {
+    const sakura = { issuer: 'https://sakura.example.com', audience: 'sakura-mcp', jwksUri: 'https://sakura.example.com/jwks',
+      scopeClaim: 'groups', clientId: 'sakura-client' };
+    // SakuraID has no built-in superuser group, so a login without configured
+    // groups never promotes by a guessed name; unverified email is filtered at callback.
+    expect(adminByGroup({ groups: ['authentik Admins'] }, sakura, [])).toBeUndefined();
+    expect(adminByGroup({ groups: ['admins'] }, sakura, [])).toBeUndefined();
+    // An explicit SakuraID group list is authoritative in both directions.
+    const configured = { ...sakura, adminGroups: ['Sakura Admins'] };
+    expect(adminByGroup({ groups: ['Sakura Admins'] }, configured)).toBe(true);
+    expect(adminByGroup({ groups: ['Users'] }, configured)).toBe(false);
+  });
+
+  it('ends the SSO session of whichever provider created the session', () => {
+    const sakuraConfig = {
+      ...config,
+      authentik: { issuer: 'https://login.example.com/application/o/sakura/', audience: 'mcp',
+        jwksUri: 'https://login.example.com/jwks/', scopeClaim: 'scope', clientId: 'authentik-client',
+        endSessionUrl: 'https://login.example.com/end-session/' },
+      sakura: { issuer: 'https://sakura.example.com', audience: 'sakura-mcp',
+        jwksUri: 'https://sakura.example.com/jwks', scopeClaim: 'groups', clientId: 'sakura-client',
+        endSessionUrl: 'https://sakura.example.com/logout' }
+    };
+    const sakuraSessions = new WebSessionService({} as never, () => sakuraConfig);
+    expect(sakuraSessions.endSessionUrl('/admin', 'sakura')).toContain('https://sakura.example.com/logout');
+    // Each provider only ends its own SSO session.
+    expect(sakuraSessions.endSessionUrl('/admin', 'sakura')).not.toContain('login.example.com');
+    expect(sakuraSessions.endSessionUrl('/admin', 'authentik')).toContain('login.example.com/end-session/');
+    expect(sakuraSessions.endSessionUrl('/admin', 'authentik')).not.toContain('sakura.example.com');
+    // A local session never created an SSO session, so there is nothing to end.
+    expect(sakuraSessions.endSessionUrl('/admin', 'local')).toBeUndefined();
+    // An Authentik installation configured before the end-session endpoint was
+    // captured still falls back to its well-known path.
+    const fallback = new WebSessionService({} as never, () => ({
+      ...config, authentik: { issuer: 'https://login.example.com/application/o/sakura/', audience: 'mcp',
+        jwksUri: 'https://login.example.com/jwks/', scopeClaim: 'scope', clientId: 'authentik-client' }
+    }));
+    expect(fallback.endSessionUrl('/admin', 'authentik')).toContain('/end-session/');
+  });
+
+  it('prefers the first configured OIDC provider for the login page', () => {
+    expect(primaryOidcProvider(config)).toBeUndefined();
+    const authentik = { issuer: 'https://login.example.com/application/o/sakura/', audience: 'mcp',
+      jwksUri: 'https://login.example.com/jwks/', scopeClaim: 'scope', clientId: 'authentik-client',
+      authorizationUrl: 'https://login.example.com/authorize', tokenUrl: 'https://login.example.com/token' };
+    expect(primaryOidcProvider({ ...config, authentik })).toBe('authentik');
+    const sakuraOnly = {
+      ...config, authentik: undefined,
+      sakura: { issuer: 'https://sakura.example.com', audience: 'sakura-mcp', jwksUri: 'https://sakura.example.com/jwks',
+        scopeClaim: 'groups', clientId: 'sakura-client',
+        authorizationUrl: 'https://sakura.example.com/authorize', tokenUrl: 'https://sakura.example.com/token' }
+    };
+    expect(primaryOidcProvider(sakuraOnly)).toBe('sakura');
   });
 
   it('requests the groups scope and exposes the admin group field', () => {

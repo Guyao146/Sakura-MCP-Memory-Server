@@ -16,7 +16,8 @@
 
 ## 本次升级注意事项
 
-- 应用启动会按 `AUTO_MIGRATE` 执行新增的 `011`（OIDC 浏览器绑定）和 `012`（向量一致性）迁移；升级前尚未完成的登录需重新发起。
+- 应用启动会按 `AUTO_MIGRATE` 执行新增的 `011`（OIDC 浏览器绑定）、`012`（向量一致性）和 `014`（Sakura OIDC 提供方）迁移；升级前尚未完成的登录需重新发起。
+- `014` 迁移为 `oidc_login_attempts` 增加 `provider` 列（默认 `authentik`，已有且具备浏览器绑定的事务保留原提供方），并放宽 `web_sessions.auth_source` 约束以记录 `sakura` 来源。Sakura 为可选功能，未通过环境变量或后台保存完整配置时不显示其入口。
 - 内容、摘要或标签修改（含冲突合并）后旧向量立即失效，避免召回旧语义；可在后台重建向量。混合搜索在 PostgreSQL 内对全空间排序，只向应用返回限制条数。
 - 应用容器固定使用 UID/GID `10001:10001`。Compose 启动前会将挂载 `data` 目录及普通文件/子目录权限调整为该用户可写；此目录应仅用于应用数据。自定义外部审计路径需自行授权。不会删除数据库卷。
 - 容器健康检查使用回环 TCP 连接及配置的公网 Host，不放宽外部 Host 校验；`npm pack` 会自动先构建，发布包包含编译产物和迁移。
@@ -474,18 +475,18 @@ auth=false
 
 任意一个变量明确为 `false` 都会启用单用户无认证模式。在此模式下：
 
-- 安装向导自动跳过 Authentik 配置和连接测试；
+- 安装向导自动跳过本地账号及外部 OIDC 身份配置和连接测试；
 - `/admin` 无需登录，使用稳定的 `Local Administrator` 系统管理员身份；
 - 根域名和兼容地址 `/mcp` 均无需 Bearer Token，使用同一本地身份和完整 scopes；
 - 管理写请求仍使用 CSRF Token；
 - 管理后台会永久显示红色安全警告；
 - 任何能连接该站点的人都拥有完整管理和记忆访问权限。
 
-公网部署不要设置 `AUTH=false`。已完成安装的实例可以通过修改该变量并重启容器切换模式；从无认证模式恢复 `AUTH=true` 前，必须确保数据库或环境变量中已有完整 Authentik 配置或已启用本地账号登录，否则浏览器登录不可用。
+公网部署不要设置 `AUTH=false`。已完成安装的实例可以通过修改该变量并重启容器切换模式；从无认证模式恢复 `AUTH=true` 前，必须确保已有完整的 Sakura/Authentik 浏览器配置或可用的本地账号，否则浏览器登录不可用。
 
 ### 本地账号登录（无需 Authentik）
 
-`AUTH=true` 时也可以不部署任何外部身份认证服务：安装向导的认证步骤勾选「不使用 Authentik，改用服务器本地账号密码登录」即可创建首位管理员，密码以 scrypt（随机盐、PHC 格式）哈希存入 PostgreSQL。未配置任何 `AUTHENTIK_*` 变量时本地登录默认启用；已配置 Authentik 时设置 `LOCAL_LOGIN=true` 可同时提供两种登录方式，登录页会互相切换。
+`AUTH=true` 时也可以不部署任何外部身份认证服务：安装向导的认证步骤选择「服务器本地账号密码」即可创建首位管理员，密码以 scrypt（随机盐、PHC 格式）哈希存入 PostgreSQL。未配置任何 `AUTHENTIK_*`/`SAKURA_*` 变量时本地登录默认启用；已配置外部 OIDC 提供方时设置 `LOCAL_LOGIN=true` 可同时提供多种登录方式，登录页会列出全部已配置的方法。
 
 ```dotenv
 LOCAL_LOGIN=true
@@ -494,19 +495,78 @@ LOCAL_ADMIN_USERNAME=admin
 LOCAL_ADMIN_PASSWORD=replace-with-strong-password
 ```
 
+- 安装向导创建本地管理员时，账号、个人空间、登录启用设置及安装状态在同一事务内提交；任一步失败都会回滚。`local_login.enabled` 持久化后重启仍生效；显式 `LOCAL_LOGIN=true/false` 优先于数据库设置，`AUTH=false` 则关闭所有登录方式；
 - 本地账号仅用于管理后台 Web 会话（12 小时，CSRF 绑定）；MCP 接口仍使用 Bearer API Key；
 - 连续 5 次密码错误会锁定账号，锁定时长按 5→10→20→40→60 分钟递增，锁定期间即使密码正确也无法登录；
 - 登录接口 `/auth/local` 与 `/auth/*` 限流（默认每分钟 20 次/ IP）共享额度；登录失败不区分「用户名不存在」与「密码错误」；
-- 系统管理员可经 `/api/admin/local-users` 增删账号与重置密码；登录后 `POST /api/me/password` 可自助修改密码（需提供当前密码）。
+- 系统管理员可在管理台「账号安全」创建本地账号、编辑资料/角色、重置密码、解锁及删除凭据；用户可修改自己的本地密码（需提供当前密码），查看本站会话并退出单个或其他会话。
+
+#### 账号安全与升级行为
+
+- 新迁移 `015_account_security.sql` 将用户名规范为小写（登录不区分 ASCII 大小写）。若旧数据存在大小写碰撞，迁移会报错停止，不会自动合并账号；请先备份，再由运维核对归属、处理冲突。仅允许原有 ASCII 用户名字符集。
+- **升级会撤销所有已有本地 Web 会话**，请重新登录；Sakura / Authentik 会话不受此迁移影响。每个本地会话绑定随机凭据版本，每次认证实时校验，旧密码的并发登录不能在重置后留下可用会话。
+- 管理员重置密码、删除凭据以及用户自助改密，均在事务内撤销该用户全部本地 Web 会话。自助改密成功会清除 Cookie 并要求重新登录（本版不保留/轮换当前会话）；不会撤销 OIDC 会话或 Agent Key。已进入执行阶段的请求不承诺被取消。
+- 创建/更新用户、个人空间、成员关系、密码写入和相关会话撤销在同一事务中完成。创建接口为 **create-only**：`POST /api/admin/local-users` 不再重置同名账号。用户名保留在用户记录中，删除凭据不删除记忆/Agent Key，也不能通过重新注册接管这些数据；运维可用 `LOCAL_ADMIN_USERNAME`/`LOCAL_ADMIN_PASSWORD` 显式恢复对应本地管理员。
+- 最后管理员保护范围是**本地账号管理操作**：删除/降权会串行检查是否还有其他未锁定的本地管理员。即使已配置外部 IdP，也不假定它一定可用；请先创建或解锁备用本地管理员。不干预上游组降权、`LOCAL_LOGIN=false`、直接 SQL 或所有账号因错误猜测被锁定等情况。
+- 自助密码校验失败也计入账号锁定；`/api/me/*` 使用认证级别的每 IP 限流额度。scrypt 只接受本系统生成的有界格式（N=16384、r=8、p=1、16 字节盐、64 字节输出），不再忽略记录的参数；手工导入的其他格式需重置密码。
+- 会话列表最多显示最近 200 个有效会话，仅返回来源、创建/最近活动/到期时间及是否当前会话，不返回 Token/哈希；目前不记录设备名称/IP。“退出其他会话”作用于当前用户的所有其他本站 Web 会话，不代表上游 SSO 退出。已有 SSO 可能重新进入本站。
+- 如果保留 `LOCAL_ADMIN_*` 环境变量，**每次启动都会重新写入该密码并撤销此账号本地会话**，也会重新授予管理员身份；日常使用页面改密前请移除该启动配置，避免重启覆盖。
+
+账号接口（写请求均须有效会话及 `X-CSRF-Token`；本地账号管理须系统管理员）：
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET/POST /api/admin/local-users` | camelCase 账号列表 / 创建新账号 |
+| `PATCH /api/admin/local-users/:username` | 更新显示名称、邮箱（可传 null 清空）、管理员身份 |
+| `PUT /api/admin/local-users/:username` | 重置密码并退出该用户本地会话 |
+| `POST /api/admin/local-users/:username/unlock` | 清除失败次数与锁定 |
+| `DELETE /api/admin/local-users/:username` | 删除本地凭据并退出本地会话，保留用户数据 |
+| `POST /api/me/password` | 校验当前密码并修改密码，成功后重新登录 |
+| `GET /api/me/sessions` | 当前用户的有效会话列表 |
+| `DELETE /api/me/sessions/:id` | 退出当前用户的指定本站会话 |
+| `POST /api/me/sessions/revoke-others` | 退出当前用户的其他本站会话 |
+
+
+### Sakura 账号服务（可选接入）
+
+除本地账号外，还支持同生态的轻量账号服务 Sakura-Auth-Server（SakuraID），通过授权码 + PKCE 和 RS256 ID Token 接入浏览器登录，可与 Authentik 并存或单独使用。登录入口按 **本地账号 → Sakura → Authentik** 排列，仅显示已启用且配置完整的方式：
+
+| 方式 | 需要部署 | 配置入口 |
+|---|---|---|
+| 本地账号 | 无 | 安装向导 / 环境变量 `LOCAL_LOGIN` |
+| Sakura | Sakura-Auth-Server | 安装向导 / 后台「身份认证」/ `SAKURA_*` 环境变量 |
+| Authentik | Authentik 服务器 | 安装向导 / 后台「身份认证」/ `AUTHENTIK_*` 环境变量 |
+
+```dotenv
+# 可选示例；全部保持注释即不启用 Sakura 登录
+# SAKURA_ISSUER=https://sakura.example.com
+# SAKURA_AUDIENCE=sakura-mcp
+# SAKURA_JWKS_URI=https://sakura.example.com/jwks.json
+# SAKURA_CLIENT_ID=sakura-mcp
+# SAKURA_AUTHORIZATION_URL=https://sakura.example.com/authorize
+# SAKURA_TOKEN_URL=https://sakura.example.com/token
+# SAKURA_SCOPE_CLAIM=groups
+# SAKURA_END_SESSION_URL=https://sakura.example.com/logout
+```
+
+- 在 Sakura-Auth-Server 中创建 **Public Client**（`token_auth=none`），注册精确回调地址 `${PUBLIC_BASE_URL}/auth/callback`；上例 `SAKURA_CLIENT_ID` 与 `SAKURA_AUDIENCE` 都填写实际注册的 Client ID；
+- 向导通过根地址的 `/.well-known/openid-configuration` 获取端点，无需应用 Slug；JWKS 实际路径为 `/jwks.json`。允许受控 LAN 测试使用 HTTP，公网必须使用 HTTPS；Discovery 和保存测试要求 Sakura 端点同源；
+- 登录请求 `openid profile email groups`，使用经签名验证的 ID Token，不把 access token 或 UserInfo 当作登录凭据。Sakura 身份存储为 `sakura:<sha256(issuer)>:<sub>`，与本地账号和 Authentik 隔离，不按同名 `sub` 或邮箱合并账号；
+- **当前 Sakura 返回 `email_verified=false`，此邮箱不会用于管理员白名单或邀请匹配。** 仅使用 Sakura 安装时必须填写由 Sakura 管理员维护的「管理员用户组」。没有内置超级用户组，也不会继承 Authentik 的 `authentik Admins` 默认规则；显式配置组后，Token 中组缺失或不匹配都会在下次 Sakura 登录时回收组授予的管理员身份；
+- Sakura 不支持静默探测。只有仅启用 Authentik 浏览器登录（未启用本地登录或 Sakura）时才自动探测现有会话，混合登录不自动跳转；
+- 退出时先撤销本服务器会话。Sakura 的 `/logout` 是需要用户确认的页面，**不是自动 RP-Initiated Logout**，不保证自动退出上游会话或返回本站；未配置此端点时只退出本站。本地会话不跳转外部提供方；
+- Sakura **仅用于浏览器登录**。MCP 使用后台生成的、按空间和 scope 授权的 Agent Key（或服务器 API Key）；只有原有 Authentik Bearer 验证受支持。受保护资源元数据不公告 Sakura，不能将 Sakura access token 用作 MCP Bearer 凭据。
+
+环境变量的 Issuer/Audience/JWKS 三项必须一同填写。浏览器入口还要求 Client ID、授权端点和令牌端点完整；仅填写三项不会显示不可用的登录按钮。Authentik 对应变量为 `AUTHENTIK_CLIENT_ID`、`AUTHENTIK_AUTHORIZATION_URL`、`AUTHENTIK_TOKEN_URL`，也可通过安装向导或后台保存完整配置。Compose 已转发这些变量，`.env.example` 的外部提供方地址默认留空。
 
 首次启动的中文 Web 安装向导包含四个步骤：
 
 1. 页面自动检查 PostgreSQL、pgvector 与迁移；
-2. `AUTH=true` 时配置并测试 Authentik Issuer、Audience、JWKS 和首位管理员邮箱，或勾选「不使用 Authentik」改为创建本地管理员账号；`AUTH=false` 时自动跳过；
+2. `AUTH=true` 时按本地账号、Sakura、Authentik 的顺序选择登录方式：本地方式创建管理员；Sakura 配置完整 OIDC 端点和管理员用户组；Authentik 配置端点及管理员邮箱或用户组。`AUTH=false` 自动跳过身份配置，不会创建账号密码；
 3. 可选配置并测试 OpenAI-compatible 或 Ollama；
 4. 确认配置加密密钥已备份，完成安装并锁定向导。
 
-`AUTH=true` 的 Authentik 步骤支持 OpenID Connect 自动发现。只需填写：
+`AUTH=true` 的 OIDC 步骤支持 OpenID Connect 自动发现。只需填写：
 
 ```text
 Authentik 地址：https://login.example.com
@@ -522,6 +582,8 @@ https://login.example.com/application/o/sakura-mcp/.well-known/openid-configurat
 并回填签发者地址、签名密钥地址、授权地址、令牌地址、用户信息地址和登出地址；也可以点击“获取 OpenID 配置”手动重试。基础地址必须是无路径、无凭据的 HTTPS 根地址，应用 Slug 只允许字母、数字、下划线和连字符。OIDC 自动发现不包含部署专属的令牌受众和客户端 ID，这两项仍需按 Authentik 提供方配置手动填写。
 
 ### 系统管理员的授予方式
+
+本地安装时创建的账号即为系统管理员。Sakura 必须使用显式维护的管理员用户组（未验证邮箱不参与授权）；以下默认组和安装邮箱规则用于 **Authentik**：
 
 系统管理员可以管理模型 Provider、Authentik 配置和版本更新。有三种授予途径，满足其一即可：
 
@@ -541,7 +603,7 @@ https://login.example.com/application/o/sakura-mcp/.well-known/openid-configurat
 安装完成后：
 
 - Setup 配置接口永久返回 `410 setup_locked`；
-- `AUTH=true` 时 Authentik 配置从数据库加载；Provider 配置始终从数据库加载；
+- `AUTH=true` 时已保存的 Authentik/Sakura 配置和本地登录启用设置从数据库加载；模型 Provider 配置始终从数据库加载；
 - OpenAI-compatible API Key 使用 AES-256-GCM 加密存储；
 - 浏览器和 API 均不能重新开启安装向导。
 
@@ -557,9 +619,9 @@ https://mcp.example.com/auth/callback
 https://mcp.example.com/auth/login
 ```
 
-该地址渲染 Sakura 登录页，点击「使用 Authentik 登录」后由 `/auth/start` 发起授权码 + PKCE 流程；这样退出后不会因 SSO Cookie 仍然有效而被立即静默登录。
+该地址按已启用的方法显示本地账号、Sakura、Authentik 入口。点击外部提供方后由 `/auth/start?provider=…` 发起授权码 + PKCE；仅 Authentik 单一登录配置可能先进行只读取显示名称的静默探测，探测不会创建本站会话，仍需用户确认。
 
-浏览器会话 Cookie 使用 `HttpOnly`、`SameSite=Lax`，HTTPS 部署下同时使用 `Secure`；数据库只保存 Session Token 的 SHA-256 哈希。退出登录后会话立即撤销，并按 OIDC RP-Initiated Logout 跳转 Authentik 的 `end_session_endpoint` 同步结束 SSO 会话，因此还需在同一个 Provider 中把登录入口注册为 post-logout redirect URI：
+浏览器会话 Cookie 使用 `HttpOnly`、`SameSite=Lax`，HTTPS 部署下同时使用 `Secure`；数据库只保存 Session Token 的 SHA-256 哈希。退出登录后本站会话立即撤销。**Authentik 来源的会话**还会按 OIDC RP-Initiated Logout 跳转其 `end_session_endpoint`，因此需要在 Authentik Provider 中把登录入口注册为 post-logout redirect URI：
 
 ```text
 https://mcp.example.com/auth/login
@@ -714,6 +776,34 @@ npm.cmd start
 ## 自动测试与发布
 
 推送分支会执行类型检查、单元测试和 Docker 构建。推送 `v*` tag 后自动运行测试、生成 npm tarball 并创建 GitHub Release。
+
+### 身份认证回归与隔离联调
+
+在项目目录执行 `npm run check` 和 `npm run build`。默认回归测试不需要数据库；页面脚本使用轻量 DOM 适配器执行，OIDC 回调使用真实签名 Token 和测试 HTTP 服务。应用路由测试加载实际路由与会话服务，但 MCP 的数据库、用户仓库、审计和监听器使用测试替身，**不等同于 PostgreSQL 或真实浏览器部署验证**。
+
+账号安全回归包括密码参数/用户名规范化、账号事务的失败路径、最后本地管理员保护、凭据版本校验、改密/重置/删除后的会话失效、CSRF、跨用户会话隔离及界面脚本。可单独运行：
+
+```powershell
+node node_modules/vitest/vitest.mjs run tests/account-security.test.ts tests/account-security-page.test.ts tests/auth-routes.test.ts
+```
+
+`npm run typecheck` 只检查应用源码，不包括测试文件。本批账号安全相关测试可通过严格 TypeScript 检查；对整个 `tests` 目录单独启用严格检查仍会报告其他生命周期、HTTP、setup 等测试中的类型错误，不能将 Vitest 通过等同于全测试文件类型检查通过。PostgreSQL 回归已包含本地账号晚期写入失败回滚、并发删除/降权、并发改密和旧数据迁移，但没有 `DATABASE_TEST_URL` 时不会执行这些验证。真实浏览器布局、Cookie/CSP、Authentik 实例和 Docker 部署仍需独立验收。
+
+如已检出 Sakura-Auth-Server，可启用真实 IdP 协议联调（PowerShell，路径按本机调整）：
+
+```powershell
+Set-Location 'D:\VSProject\Sakura-MCP-Server'
+$env:SAKURA_AUTH_SOURCE = 'D:\VSProject\Sakura-Auth-Server'
+try {
+    node node_modules/vitest/vitest.mjs run tests/auth-routes.test.ts
+} finally {
+    Remove-Item Env:SAKURA_AUTH_SOURCE -ErrorAction SilentlyContinue
+}
+```
+
+此项测试要求支持 `node:sqlite` 的 Node（建议 Node 24），仅在临时目录创建 SQLite、签名密钥、测试用户和 Public Client，子进程使用随机回环端口，结束后清理。不修改提供方源码或其现有 `data`，也不使用正在运行的 IdP。测试执行真实登录表单、授权同意、PKCE 换码、本站回调与登出，以及 Sakura 上游登出确认；未设置 `SAKURA_AUTH_SOURCE` 时仅跳过此项。它不覆盖真实浏览器的 Cookie/CSP 行为，也不证明 Authentik 实例已联调。
+
+PostgreSQL 测试则需要通过 `DATABASE_TEST_URL` 指向**全新、可丢弃、已提供 pgvector 的专用测试数据库**，再运行 `node node_modules/vitest/vitest.mjs run tests/database.integration.test.ts`。测试会应用全部迁移、创建管理员、写入安装状态和记忆等数据，不自动恢复数据库；**不要指向生产库或现有开发库**。未配置时数据库测试跳过，不能据此宣布迁移或数据库事务已验证。
 
 ## 许可证
 

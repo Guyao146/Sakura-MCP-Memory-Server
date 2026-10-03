@@ -4,15 +4,15 @@ import { loadConfig } from '../src/config.js';
 import { safeReturnPath, WebSessionService } from '../src/web/session.js';
 
 const hash = (text: string) => createHash('sha256').update(text).digest('hex');
-function fixture() {
-  const rows = new Map<string, { binding: string; purpose: string }>();
+function fixture(provider: 'authentik' | 'sakura' = 'authentik') {
+  const rows = new Map<string, { binding: string; purpose: string; provider: string }>();
   const query = vi.fn(async (sql: string, args: string[] = []) => {
-    if (sql.includes('INSERT INTO oidc_login_attempts')) rows.set(args[0], { binding: args[5], purpose: args[4] });
+    if (sql.includes('INSERT INTO oidc_login_attempts')) rows.set(args[0], { binding: args[5], purpose: args[4], provider: args[6] });
     if (sql.includes('RETURNING code_verifier')) {
       const row = rows.get(args[0]);
       if (row && row.binding === args[2] && (!args[1] || row.purpose === args[1])) {
         rows.delete(args[0]);
-        return { rows: [{ purpose: row.purpose }] };
+        return { rows: [{ purpose: row.purpose, provider: row.provider }] };
       }
     }
     return { rows: [] };
@@ -21,8 +21,10 @@ function fixture() {
     CONFIG_ENCRYPTION_KEY: Buffer.alloc(32).toString('base64url') });
   config.authentik = { issuer: 'https://idp.example.com', audience: 'client', jwksUri: 'https://idp.example.com/jwks',
     scopeClaim: 'scope', clientId: 'client', authorizationUrl: 'https://idp.example.com/authorize', tokenUrl: 'https://idp.example.com/token' };
+  config.sakura = { issuer: 'https://sakura.example.com', audience: 'sakura-client', jwksUri: 'https://sakura.example.com/jwks',
+    scopeClaim: 'groups', clientId: 'sakura-client', authorizationUrl: 'https://sakura.example.com/authorize', tokenUrl: 'https://sakura.example.com/token' };
   const service = new WebSessionService({ query, pool: { connect: async () => ({ query, release() {} }) } } as never, () => config);
-  return { service, rows, query };
+  return { service, rows, query, config, provider };
 }
 
 afterEach(() => vi.unstubAllGlobals());
@@ -69,6 +71,28 @@ describe('OIDC browser binding', () => {
     const cookies = [a.cookie.split(';')[0], b.cookie.split(';')[0]].join('; ');
     await expect(service.failedCallback(new URL(a.url).searchParams.get('state')!, cookies)).resolves.toBe('probe');
     await expect(service.failedCallback(new URL(b.url).searchParams.get('state')!, cookies)).resolves.toBe('login');
+  });
+
+  it('targets the configured provider per login and never probes SakuraID with prompt=none', async () => {
+    const { service, query } = fixture('sakura');
+    const login = await service.begin('/admin', 'login', 'sakura');
+    const loginUrl = new URL(login.url);
+    expect(loginUrl.searchParams.get('client_id')).toBe('sakura-client');
+    // SakuraID exposes groups through the standard `groups` scope, so it must be
+    // requested for the claim to appear in the ID Token.
+    expect(loginUrl.searchParams.get('scope')).toContain('groups');
+    // Its authorize endpoint renders a login page instead of answering
+    // `prompt=none`, so the login must not ask it to stay silent.
+    expect(loginUrl.searchParams.get('prompt')).toBeNull();
+    expect(query.mock.calls[0][1][6]).toBe('sakura');
+    const probe = await service.begin('/admin', 'probe', 'authentik');
+    expect(new URL(probe.url).searchParams.get('prompt')).toBe('none');
+    await expect(service.begin('/admin', 'login', 'sakura')).resolves.toBeTruthy();
+    // A provider without any configuration cannot be started.
+    const partial = loadConfig({ PUBLIC_BASE_URL: 'https://mcp.example.com', DATABASE_URL: 'postgresql://unused',
+      CONFIG_ENCRYPTION_KEY: Buffer.alloc(32).toString('base64url') });
+    const unconfigured = new WebSessionService({ query, pool: { connect: async () => ({ query, release() {} }) } } as never, () => partial);
+    await expect(unconfigured.begin('/admin', 'login', 'sakura')).rejects.toThrow('Sakura browser login is not configured');
   });
 
   it.each(['//evil.example', '/\\evil.example', '/\n/evil.example', '/a/..//evil.example', 'https://evil.example'])('rejects unsafe return target %j', path => {

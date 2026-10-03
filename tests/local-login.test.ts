@@ -145,14 +145,13 @@ describe('LocalLoginService', () => {
   });
 
   it('refuses a self-service password change without the current password', async () => {
-    const database = {
-      query: vi.fn(async (sql: string) => {
-        if (sql.startsWith('SELECT username,password_hash')) {
-          return { rows: [{ username: 'admin', password_hash: await hashPassword(CORRECT) }] };
-        }
-        return { rows: [] };
-      })
-    } as unknown as Database;
+    const query = vi.fn(async (sql: string) => {
+      if (sql.startsWith('SELECT password_hash,locked_until')) {
+        return { rows: [{ password_hash: await hashPassword(CORRECT), locked_until: new Date(0), failed_attempts: 0 }] };
+      }
+      return { rows: [] };
+    });
+    const database = { pool: { connect: async () => ({ query, release() {} }) } } as unknown as Database;
     const service = new LocalLoginService(database);
     await expect(service.changePassword('user-1', 'wrong password', 'new-password')).rejects.toThrow('当前密码不正确');
     await expect(service.changePassword('user-1', CORRECT, 'short')).rejects.toThrow('密码');

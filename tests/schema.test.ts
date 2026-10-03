@@ -174,6 +174,20 @@ describe('memory database schema', () => {
     expect(source).toContain("'Authentik 配置已保存。请将 AUTH 恢复为 true 并重启应用。'");
   });
 
+  it('exposes system-admin Sakura provider endpoints', async () => {
+    const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+    expect(source).toContain("app.get('/api/admin/sakura'");
+    expect(source).toContain("app.put('/api/admin/sakura'");
+    expect(source).toContain('await setup.testSakura(body.sakura)');
+    expect(source).toContain('await settings.saveSakura(body.sakura)');
+    // The login start route accepts an explicit provider, and the modes response
+    // tells the login page which providers are actually configured.
+    expect(source).toContain("app.post('/api/setup/discover-sakura'");
+    expect(source).toContain("app.post('/api/setup/test-sakura'");
+    expect(source).toContain("browserLoginConfigured(config, requested as OidcProvider)");
+    expect(source).toContain("sakura: browserLoginConfigured(config, 'sakura')");
+  });
+
   it('supports a dedicated embedding provider endpoint', async () => {
     const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
     expect(source).toContain("z.enum(['openai_compatible', 'ollama', 'embedding'])");
@@ -202,15 +216,31 @@ describe('memory database schema', () => {
     expect(source).toContain('AND browser_binding_hash=$3');
     expect(source).toContain("consumeAttempt(state, 'login', cookieHeader)");
     expect(source).toContain("consumeAttempt(state, 'probe', cookieHeader)");
-    // The probe must ask Authentik to stay silent rather than render its login form.
-    expect(source).toContain("if (purpose === 'probe') url.searchParams.set('prompt', 'none')");
+    // The transaction also records which provider started it, so the callback
+    // exchanges the code against that provider's token endpoint.
+    expect(source).toContain('RETURNING code_verifier,nonce,return_to,purpose,provider');
+    // The probe must ask the provider to stay silent rather than render its login
+    // form. Only a provider that answers `prompt=none` with a standard error is
+    // ever probed, so the parameter is gated on that capability.
+    expect(source).toContain("if (purpose === 'probe' && SILENT_PROBE_PROVIDERS.includes(provider)) url.searchParams.set('prompt', 'none')");
+  });
+
+  it('records the provider of each login transaction and session', async () => {
+    const sql = await readFile(new URL('../migrations/014_sakura_oidc_provider.sql', import.meta.url), 'utf8');
+    expect(sql).toContain("ADD COLUMN provider text NOT NULL DEFAULT 'authentik'");
+    expect(sql).toContain("CHECK (provider IN ('authentik', 'sakura'))");
+    expect(sql).toContain("CHECK (auth_source IN ('authentik', 'local', 'sakura'))");
+    expect(sql).toContain('web_sessions_auth_source_check');
   });
 
   it('probes at most once per visit and never redirects in a loop', async () => {
     const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
     expect(source).toContain("context.req.query('probed') !== '1'");
-    expect(source).toContain("webSessions.begin(returnTo, 'probe')");
+    expect(source).toContain("webSessions.begin(returnTo, 'probe', primary)");
     expect(source).toContain('WebSessionService.isProbeMiss(failure)');
+    // Only a provider that answers a silent probe is ever probed: SakuraID would
+    // render its own login page instead of answering, trapping the visitor.
+    expect(source).toContain('SILENT_PROBE_PROVIDERS.includes(primary)');
     // A failed probe still lands on the login page instead of surfacing an error.
     expect(source).toContain("'/auth/login?probed=1&reason=probe_failed'");
   });

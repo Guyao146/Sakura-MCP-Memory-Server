@@ -6,9 +6,19 @@
 
 ### 新增
 
-- 新增服务器本地账号登录：`/auth/login` 在未配置 Authentik 时渲染账号密码登录页，安装向导也可勾选「不使用 Authentik，改用服务器本地账号密码登录」创建首位管理员。密码以 scrypt（PHC 格式、随机盐）哈希存入 `local_credentials`，连续失败 5 次锁定账号并按 5→10→20→40→60 分钟递增锁定时长，锁定期间即使密码正确也无法登录；登录失败不区分「用户名不存在」与「密码错误」。本地账号仅用于管理后台 Web 会话，MCP 接口仍使用 Bearer API Key。混合部署可用 `LOCAL_LOGIN=true` 与本地账号并存，登录页通过 `/auth/modes` 互相切换。
+- 管理台新增「账号安全」：本地账号创建、资料/角色编辑、密码重置、解锁、凭据删除，自助改密、本站会话列表及退出其他会话；不自动合并不同登录来源账号，不影响 Agent Key。
+- 新增迁移 `015_account_security.sql`：本地用户名小写规范化，碰撞停止迁移；本地会话绑定随机凭据版本并实时校验。升级撤销既有本地会话，Sakura / Authentik 不受影响。
+- 本地账号写入与会话撤销事务化，删除/降权串行保护最后一个未锁定本地管理员；创建 API 改为 create-only，不能用同名创建覆盖密码或重新注册接管已保留的数据。自助改密后全部本地会话退出并清 Cookie；管理员重置/删除凭据亦撤销本地会话。
+- 修复账号列表 camelCase 映射、用户名大小写不一致、scrypt 记录参数被忽略；自助旧密码错误计入账号锁定，`/api/me/*` 增加认证级别限流。新增服务、生产路由、页面脚本及可选 PostgreSQL 事务/并发/迁移回归。
+
+- 新增可选的 Sakura（Sakura-Auth-Server / SakuraID）浏览器登录。入口及安装选项按 **本地账号 → Sakura → Authentik** 排列，可独立使用或混合部署。Sakura 使用授权码 + PKCE、RS256 ID Token 和 `/jwks.json`；根地址 Discovery 无需应用 Slug，支持受控 LAN 的 HTTP 地址，发现和保存测试要求端点同源。
+- 外部提供方默认不启用。浏览器登录除 Issuer/Audience/JWKS 外还必须配置 Client ID、授权和令牌端点，支持 `AUTHENTIK_CLIENT_ID`/`AUTHENTIK_AUTHORIZATION_URL`/`AUTHENTIK_TOKEN_URL` 及对应 `SAKURA_*` 变量；Compose 同步转发。安装向导和后台提供 Sakura 配置及 `/api/admin/sakura` 接口。
+- Sakura 请求 `openid profile email groups`，身份以 `sakura:<sha256(issuer)>:<sub>` 隔离。当前 Sakura 邮箱未经验证，不能用于白名单提权；仅用 Sakura 安装必须显式填写管理员用户组，不继承 Authentik 默认管理员组。仅 Authentik 单一浏览器登录模式自动静默探测，混合模式保留选择页。
+- 新增迁移 `014_sakura_oidc_provider.sql`：登录事务记录 `provider`，会话记录真实 `auth_source`。退出时先撤销本站会话；Sakura 的可选 `/logout` 是确认页，不承诺自动退出或返回本站。Sakura 仅用于浏览器登录，MCP 继续使用 API/Agent Key 或原有 Authentik Bearer；受保护资源元数据不公告 Sakura。
+- 新增服务器本地账号登录：`/auth/login` 在没有完整外部浏览器登录配置时渲染本地账号密码页，安装向导可选择本地账号方式创建首位管理员。密码以 scrypt（PHC 格式、随机盐）哈希存入 `local_credentials`，连续失败 5 次锁定账号并按 5→10→20→40→60 分钟递增锁定时长，锁定期间即使密码正确也无法登录；登录失败不区分「用户名不存在」与「密码错误」。本地账号仅用于管理后台 Web 会话，MCP 接口仍使用 Bearer API Key。混合部署可用 `LOCAL_LOGIN=true` 与本地账号并存，登录页通过 `/auth/modes` 互相切换。
 - 本地账号可通过环境变量 `LOCAL_ADMIN_USERNAME`/`LOCAL_ADMIN_PASSWORD` 在启动时幂等创建（改密码后重启即生效），或由系统管理员经 `/api/admin/local-users` 增删改；登录后可在「修改密码」接口自助更换（需提供当前密码）。安装迁移新增 `013_local_login.sql`，并为 `web_sessions` 增加 `auth_source` 列，使审计与退出登录记录真实来源。
-- `/auth/local`、`/api/me/password` 等登录类接口纳入 `/auth/*` 限流（默认每分钟 20 次/ IP）。
+- 新增实际应用登录路由回归和可选隔离 Sakura IdP 联调，通过 `SAKURA_AUTH_SOURCE` 启用真实登录、授权同意、PKCE 换码及登出确认；临时实例仅监听回环地址，测试结束清理数据，不触碰现有提供方。MCP 数据层仍为测试替身，PostgreSQL 验证需单独配置专用测试库。
+- `/auth/local` 与其他 `/auth/*` 路由共享认证限流；`/api/me/*`（含自助改密与会话管理）使用独立的同级限流桶，均默认每分钟 20 次/IP。
 
 ### 性能优化
 
@@ -25,6 +35,8 @@
 
 ### 修复
 
+- 安装向导创建本地管理员、个人空间、`local_login.enabled` 设置和安装完成状态改为同一事务提交，失败完整回滚；显式 `LOCAL_LOGIN` 优先于持久化设置，`AUTH=false` 不创建本地密码账号。
+- Authentik 浏览器及 Bearer 路径拒绝本地/Sakura 保留 subject 命名空间；Sakura 回调严格验证 RS256 签名、Issuer、Client ID audience、nonce、有效期和签发时间，忽略未验证邮箱。显式请求未知或未完整配置的提供方不再回退。
 - 修复 Docker 服务端退出时 Worker 未取消、HTTP 未停止接收请求却先关闭数据库的问题；统一有时限的关闭流程，清理 MCP 流、Provider 请求及定时器，Compose 启用 init 信号转发与进程回收。
 - 后台任务单飞执行，独立心跳感知取消并续租；状态写入校验持锁者，回收失联的已取消或耗尽重试任务，正常关闭不消耗失败重试次数。
 - 批量向量重建分页读取 ID、限制错误摘要内存；HTTP 请求设置并发上限，客户端断开时取消上游 AI 请求，避免取消被误计为向量失败。

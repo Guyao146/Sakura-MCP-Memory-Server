@@ -1,6 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { Database } from '../src/database.js';
 import { MemoryRepository } from '../src/memory/repository.js';
+import { LocalLoginService } from '../src/web/local-login.js';
+import { oidcSubject } from '../src/security/oidc.js';
 import { SettingsRepository } from '../src/settings/repository.js';
 import { AgentRepository } from '../src/agents/repository.js';
 import { ClientSessionRepository } from '../src/clients/repository.js';
@@ -16,7 +18,7 @@ import { JobRepository } from '../src/jobs/repository.js';
 import { BackgroundWorker } from '../src/jobs/worker.js';
 import { AuditLogger } from '../src/audit.js';
 import { APP_VERSION } from '../src/version.js';
-import { unlink } from 'node:fs/promises';
+import { unlink, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const connectionString = process.env.DATABASE_TEST_URL;
@@ -35,12 +37,31 @@ describeDatabase('PostgreSQL installation integration', () => {
     const extension = await database.query<{ extversion: string }>("SELECT extversion FROM pg_extension WHERE extname='vector'");
     const migrations = await database.query<{ name: string }>('SELECT name FROM schema_migrations ORDER BY name');
     expect(extension.rows[0].extversion).toBeTruthy();
-    expect(migrations.rows.map(row => row.name)).toEqual(['001_memory_platform.sql', '002_installation.sql', '003_web_sessions.sql', '004_semantic_memory.sql', '005_memory_governance.sql', '006_background_jobs.sql', '007_audit_security.sql', '008_agent_secret_reveal.sql', '009_login_probe.sql', '010_client_sessions.sql', '011_oidc_browser_binding.sql', '012_embedding_consistency.sql']);
+    expect(migrations.rows.map(row => row.name)).toEqual(['001_memory_platform.sql', '002_installation.sql', '003_web_sessions.sql', '004_semantic_memory.sql', '005_memory_governance.sql', '006_background_jobs.sql', '007_audit_security.sql', '008_agent_secret_reveal.sql', '009_login_probe.sql', '010_client_sessions.sql', '011_oidc_browser_binding.sql', '012_embedding_consistency.sql', '013_local_login.sql', '014_sakura_oidc_provider.sql', '015_account_security.sql']);
+    await expect(settings.installation()).resolves.toMatchObject({ completed: false });
+  });
+
+  it('rolls back a local installation including credentials and settings on a late failure', async () => {
+    const client = await database.pool.connect();
+    const originalQuery = client.query.bind(client);
+    const query = vi.spyOn(client, 'query').mockImplementation((async (sql: string, values?: unknown[]) => {
+      if (sql.includes('UPDATE installation_state')) throw new Error('injected install failure');
+      return originalQuery(sql, values);
+    }) as typeof client.query);
+    const failingSettings = new SettingsRepository({ pool: { connect: async () => client } } as never, encryptionKey);
+    try {
+      await expect(failingSettings.complete({ localAdmin: { username: 'rollback-owner', password: 'rollback-password-123' } }))
+        .rejects.toThrow('injected install failure');
+    } finally { query.mockRestore(); }
+    expect((await database.query("SELECT id FROM users WHERE oidc_subject='local:rollback-owner'")).rows).toHaveLength(0);
+    expect((await database.query("SELECT user_id FROM local_credentials WHERE username='rollback-owner'")).rows).toHaveLength(0);
+    expect(await settings.get('local_login.enabled')).toBeUndefined();
     await expect(settings.installation()).resolves.toMatchObject({ completed: false });
   });
 
   it('completes installation once and encrypts provider credentials', async () => {
     await settings.complete({
+      localAdmin: { username: 'install-owner', password: 'installation-password-123' },
       administratorEmail: 'owner@example.com',
       authentik: {
         issuer: 'https://login.example.com/application/o/sakura-mcp/', audience: 'https://mcp.example.com',
@@ -59,10 +80,112 @@ describeDatabase('PostgreSQL installation integration', () => {
     await expect(settings.complete({ administratorEmail: 'other@example.com', authentik: { issuer: 'https://login.example.com', audience: 'mcp', jwksUri: 'https://login.example.com/jwks', scopeClaim: 'scope' } })).rejects.toThrow('already installed');
   });
 
+  it('persists local login and accepts isolated Sakura sessions after all migrations', async () => {
+    await database.migrate(); // Re-running migrations must be harmless.
+    const config = await settings.apply(loadConfig({ PUBLIC_BASE_URL: 'https://mcp.example.com',
+      DATABASE_URL: connectionString!, CONFIG_ENCRYPTION_KEY: encryptionKey }));
+    expect(config.localLogin.enabled).toBe(true);
+    await expect(new LocalLoginService(database).login('install-owner', 'installation-password-123'))
+      .resolves.toMatchObject({ isSystemAdmin: true });
+    const memory = new MemoryRepository(database);
+    const legacy = await memory.ensureUser('shared-sub');
+    const sakura = await memory.ensureUser(oidcSubject('sakura', 'https://sakura.example', 'shared-sub'));
+    expect(sakura.userId).not.toBe(legacy.userId);
+    const sessions = new WebSessionService(database, () => config);
+    const session = await sessions.issueSession(sakura.userId, '/admin', 'sakura');
+    await expect(sessions.authenticate(session.token)).resolves.toMatchObject({ authSource: 'sakura', userId: sakura.userId });
+    await sessions.logout(session.token);
+    await expect(sessions.authenticate(session.token)).rejects.toThrow('revoked');
+  });
+
+  it('rolls back account writes and session revocation together on a late failure', async () => {
+    const local = new LocalLoginService(database);
+    const account = await local.upsert('atomic-owner', 'original-password', {});
+    const config = loadConfig({ PUBLIC_BASE_URL: 'https://mcp.example.com', DATABASE_URL: connectionString!, CONFIG_ENCRYPTION_KEY: encryptionKey });
+    const web = new WebSessionService(database, () => config);
+    const login = await local.login('ATOMIC-OWNER', 'original-password');
+    const session = await web.issueSession(account.userId, '/admin', 'local', login.credentialVersion);
+    const client = await database.pool.connect(); const original = client.query.bind(client);
+    const query = vi.spyOn(client, 'query').mockImplementation((async (sql: string, args?: unknown[]) => {
+      const result = await original(sql, args);
+      if (sql.startsWith('UPDATE web_sessions')) throw new Error('injected after revocation');
+      return result;
+    }) as typeof client.query);
+    try {
+      const failing = new LocalLoginService({ pool: { connect: async () => client } } as never);
+      await expect(failing.upsert('atomic-owner', 'replacement-password', { displayName: 'Changed', isSystemAdmin: true })).rejects.toThrow('injected');
+    } finally { query.mockRestore(); }
+    await expect(local.login('atomic-owner', 'original-password')).resolves.toMatchObject({ isSystemAdmin: false });
+    await expect(web.authenticate(session.token)).resolves.toMatchObject({ userId: account.userId });
+    await local.setPassword('atomic-owner', 'replacement-password');
+    await expect(web.authenticate(session.token)).rejects.toThrow('revoked');
+    await expect(web.issueSession(account.userId, '/admin', 'local', login.credentialVersion)).rejects.toThrow('changed');
+    const fresh = await local.login('atomic-owner', 'replacement-password');
+    const freshSession = await web.issueSession(account.userId, '/admin', 'local', fresh.credentialVersion);
+    await local.remove('atomic-owner');
+    await expect(web.authenticate(freshSession.token)).rejects.toThrow('revoked');
+    await expect(local.upsert('ATOMIC-OWNER', 'replacement-password', {}, true)).rejects.toThrow('用户名已存在');
+  });
+
+  it('serializes concurrent last-admin deletion/demotion and rejects locked alternatives', async () => {
+    const local = new LocalLoginService(database);
+    const previous = await database.query<{ id: string }>('SELECT u.id FROM users u JOIN local_credentials lc ON lc.user_id=u.id WHERE u.is_system_admin');
+    const a = await local.upsert('guard-one', 'guard-password', { isSystemAdmin: true });
+    const b = await local.upsert('guard-two', 'guard-password', { isSystemAdmin: true });
+    try {
+      await database.query('UPDATE users SET is_system_admin=false WHERE id=ANY($1::uuid[])', [previous.rows.map(r => r.id)]);
+      await database.query("UPDATE local_credentials SET locked_until=now()+interval '1 hour' WHERE user_id=$1", [b.userId]);
+      await expect(local.remove('guard-one')).rejects.toThrow('最后一个可用');
+      await local.unlock('guard-two');
+      const results = await Promise.allSettled([local.remove('guard-one'), local.updateProfile('guard-two', { isSystemAdmin: false })]);
+      expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1);
+      expect(results.filter(r => r.status === 'rejected')).toHaveLength(1);
+      const remaining = await database.query('SELECT lc.user_id FROM local_credentials lc JOIN users u ON u.id=lc.user_id WHERE u.is_system_admin AND lc.locked_until<=now()');
+      expect(remaining.rows).toHaveLength(1);
+    } finally {
+      await database.query('UPDATE users SET is_system_admin=true WHERE id=ANY($1::uuid[])', [previous.rows.map(r => r.id)]);
+      await database.query('UPDATE users SET is_system_admin=false WHERE id=ANY($1::uuid[])', [[a.userId, b.userId]]);
+    }
+  });
+
+  it('allows only one concurrent password change authenticated with the old password', async () => {
+    const local = new LocalLoginService(database);
+    const user = await local.upsert('change-race', 'old-password-123', {});
+    const results = await Promise.allSettled([
+      local.changePassword(user.userId, 'old-password-123', 'new-password-one'),
+      local.changePassword(user.userId, 'old-password-123', 'new-password-two')
+    ]);
+    expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter(r => r.status === 'rejected')).toHaveLength(1);
+  });
+
   it('promotes the allowlisted Authentik email on first login', async () => {
     const identity = await new MemoryRepository(database).ensureUser('authentik-subject-owner', { email: 'OWNER@example.com', displayName: 'Owner' });
     const user = await database.query<{ is_system_admin: boolean }>('SELECT is_system_admin FROM users WHERE id=$1', [identity.userId]);
     expect(user.rows[0].is_system_admin).toBe(true);
+  });
+
+  it.each([false, true])('migrates legacy local names and sessions without silently merging collisions (%s)', async collision => {
+    const sql = await readFile(new URL('../migrations/015_account_security.sql', import.meta.url), 'utf8');
+    const client = await database.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('CREATE TEMP TABLE local_credentials(username text UNIQUE) ON COMMIT DROP');
+      await client.query('CREATE TEMP TABLE web_sessions(user_id uuid,auth_source text,revoked_at timestamptz,created_at timestamptz) ON COMMIT DROP');
+      await client.query("INSERT INTO local_credentials VALUES('Owner')");
+      await client.query("INSERT INTO web_sessions(auth_source) VALUES('local'),('sakura'),('authentik')");
+      if (collision) {
+        await client.query("INSERT INTO local_credentials VALUES('owner')");
+        await expect(client.query(sql)).rejects.toThrow('collision');
+      } else {
+        await client.query(sql);
+        expect((await client.query('SELECT username,credential_version FROM local_credentials')).rows[0]).toMatchObject({ username: 'owner', credential_version: expect.any(String) });
+        const sessions = (await client.query('SELECT auth_source,revoked_at FROM web_sessions')).rows;
+        expect(sessions.find(s => s.auth_source === 'local').revoked_at).toBeTruthy();
+        expect(sessions.filter(s => s.auth_source !== 'local').every(s => s.revoked_at === null)).toBe(true);
+        await expect(client.query("INSERT INTO local_credentials(username) VALUES('UPPER')")).rejects.toThrow();
+      }
+    } finally { await client.query('ROLLBACK'); client.release(); }
   });
 
   it('synchronises system administration with Authentik group membership', async () => {
