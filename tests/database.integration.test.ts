@@ -513,9 +513,14 @@ describeDatabase('PostgreSQL installation integration', () => {
     const claimed = await Promise.all([jobs.claim('claimer-a', 900), jobs.claim('claimer-b', 900)]);
     expect(claimed.filter(Boolean)).toHaveLength(1);
     await database.query(`UPDATE ingestion_jobs SET status='pending',attempts=0,locked_at=NULL,locked_by=NULL WHERE id=$1`, [queued.id]);
-    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ embeddings: [[0, 1, 0]] }), {
-      status: 200, headers: { 'Content-Type': 'application/json' }
-    })));
+    // Ollama answers a batched embed request with one vector per input text.
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const request = init?.body ? JSON.parse(init.body as string) as { input?: unknown } : {};
+      const inputs = Array.isArray(request.input) ? request.input : [request.input];
+      return new Response(JSON.stringify({ embeddings: inputs.map(() => [0, 1, 0]) }), {
+        status: 200, headers: { 'Content-Type': 'application/json' }
+      });
+    }));
     const log = { info: vi.fn(), error: vi.fn() };
     const worker = new BackgroundWorker(database, semantic, 1000, 900, log);
     await expect(worker.runOnce()).resolves.toBe(true);
