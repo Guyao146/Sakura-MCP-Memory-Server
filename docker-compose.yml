@@ -75,7 +75,7 @@ services:
         find /data -type f -exec chown 10001:10001 {} + -exec chmod 600 {} +
 
   sakura-mcp:
-    image: ${SAKURA_MCP_IMAGE:-ghcr.io/guyao146/sakura-mcp-server:0.3.4}
+    image: ${SAKURA_MCP_IMAGE:-ghcr.io/guyao146/sakura-mcp-server:0.4.0}
     container_name: sakura-mcp-server-app
     pull_policy: always
     restart: unless-stopped

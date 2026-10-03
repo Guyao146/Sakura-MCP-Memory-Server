@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.3.4';
+export const APP_VERSION = '0.4.0';
 
 const RELEASE_API_URL = 'https://api.github.com/repos/Guyao146/Sakura-MCP-Server/releases/latest';
 const RELEASE_PAGE_URL = 'https://github.com/Guyao146/Sakura-MCP-Server/releases/tag/';

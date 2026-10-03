@@ -1,4 +1,4 @@
-﻿# Sakura-MCP-Server
+# Sakura-MCP-Server
 
 **Sakura-MCP-Server** 是面向所有兼容 MCP 的 AI Agent 的多用户长期记忆平台。Claude、Cline、Cursor、Windsurf 及其他 Agent 可以在经过授权后，把事实、偏好、人物、事件、任务、项目、文档摘要和对话结论写入同一个可治理的记忆库，并在未来的会话中召回。
 
@@ -268,7 +268,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml build sakura-mcp
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --no-deps sakura-mcp
 ```
 
-不要使用 `down -v`；仅拉取旧的 `0.3.4` 镜像不会包含本地修复。
+不要使用 `down -v`；仅拉取已发布镜像不会包含本地修复，必须用上面的开发覆盖重新构建。
 
 ```dotenv
 WORKER_ENABLED=true
@@ -362,7 +362,7 @@ docker compose up -d
 `docker-compose.yml` 是生产编排文件，默认直接拉取：
 
 ```text
-ghcr.io/guyao146/sakura-mcp-server:0.3.4
+ghcr.io/guyao146/sakura-mcp-server:0.4.0
 ```
 
 如果 GHCR Package 设置为 Public，服务器无需 `docker login`。首次发布后请在 GitHub 仓库的 **Packages → sakura-mcp-server → Package settings** 中确认可见性为 **Public**。
@@ -392,7 +392,7 @@ docker compose up -d
 生产 Compose 不需要本地 Dockerfile、Node.js、npm 或完整源码。镜像版本通过 `.env` 覆盖：
 
 ```dotenv
-SAKURA_MCP_IMAGE=ghcr.io/guyao146/sakura-mcp-server:0.3.4
+SAKURA_MCP_IMAGE=ghcr.io/guyao146/sakura-mcp-server:0.4.0
 ```
 
 如果需要固定到其他已发布版本，只需修改 `SAKURA_MCP_IMAGE`，然后执行 `docker compose pull && docker compose up -d`。
@@ -742,7 +742,7 @@ npm.cmd start
 
 ## 当前开发状态
 
-`v0.1.0` 是早期安全 MCP 网关版本；当前 `main` 的应用版本为 `v0.3.4`，对应 GHCR 镜像和生产 Compose 部署版本。
+`v0.1.0` 是早期安全 MCP 网关版本；当前 `main` 的应用版本为 `v0.4.0`，对应 GHCR 镜像 `ghcr.io/guyao146/sakura-mcp-server:0.4.0`（另有 `latest`）和生产 Compose 部署版本。
 
 已完成：
 
@@ -765,6 +765,7 @@ npm.cmd start
 - PostgreSQL 持久化 Worker、并发安全领取、取消、重试和批量向量重建；
 - PostgreSQL/JSONL 统一安全审计、递归脱敏、租户过滤和审计后台；
 - HTTP 安全头、分级限流、可信代理模式、详细健康检查和容器安全扫描；
+- 本地账号登录、可选 Sakura 浏览器登录（本地 → Sakura → Authentik）与账号安全中心：会话/凭据版本绑定、事务化账号管理、会话撤销与最后管理员保护；
 
 进行中：
 
@@ -775,7 +776,7 @@ npm.cmd start
 
 ## 自动测试与发布
 
-推送分支会执行类型检查、单元测试和 Docker 构建。推送 `v*` tag 后自动运行测试、生成 npm tarball 并创建 GitHub Release。
+推送分支会执行类型检查、单元测试和 Docker 构建。推送 `v*` tag 后自动运行测试、生成 npm tarball 并创建 GitHub Release，同时为 `linux/amd64` 与 `linux/arm64` 构建 GHCR 镜像，以版本号（如 `0.4.0`）和 `latest` 发布；发布镜像与本地 Dockerfile 构建内容一致，CI 会先行验证 Compose 与镜像构建。GHCR Package 默认继承仓库可见性，首次发布后可在 **Packages → Package settings** 中确认为 Public，使服务器无需 `docker login`。
 
 ### 身份认证回归与隔离联调
 
