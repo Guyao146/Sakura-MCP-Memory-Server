@@ -5,7 +5,10 @@ import type { MemoryRecord, RememberInput } from './types.js';
 export class MemoryRepository {
   constructor(private readonly database: Database) {}
 
-  async ensureUser(subject: string, profile?: { email?: string; displayName?: string; adminByGroup?: boolean }): Promise<{ userId: string; personalSpaceId: string }> {
+  async ensureUser(subject: string, profile?: { email?: string; displayName?: string; adminByGroup?: boolean; allowAdminByEmail?: boolean }): Promise<{ userId: string; personalSpaceId: string }> {
+    // Stored profile data (including an Agent owner's email) is not an identity
+    // provider assertion. Callers must explicitly opt in with verified OIDC email.
+    const allowAdminByEmail = profile?.allowAdminByEmail === true;
     // A live DB lookup, not an authorization cache. Skip provisioning writes only
     // while profile, administrator state, personal space and membership are current.
     const existing = await this.database.query<{ userId: string; personalSpaceId: string }>(
@@ -16,9 +19,9 @@ export class MemoryRepository {
        AND ($3::text IS NULL OR u.display_name IS NOT DISTINCT FROM $3)
        AND u.last_login_at > now()-interval '5 minutes'
        AND CASE WHEN $4::boolean IS NULL THEN
-         u.is_system_admin OR NOT EXISTS (SELECT 1 FROM system_admin_allowlist WHERE lower(email)=lower($2))
-       ELSE u.is_system_admin = ($4 OR EXISTS (SELECT 1 FROM system_admin_allowlist WHERE lower(email)=lower($2))) END`,
-      [subject, profile?.email ?? null, profile?.displayName ?? null, profile?.adminByGroup ?? null]);
+         u.is_system_admin OR NOT ($5::boolean AND EXISTS (SELECT 1 FROM system_admin_allowlist WHERE lower(email)=lower($2)))
+       ELSE u.is_system_admin = ($4 OR ($5::boolean AND EXISTS (SELECT 1 FROM system_admin_allowlist WHERE lower(email)=lower($2)))) END`,
+      [subject, profile?.email ?? null, profile?.displayName ?? null, profile?.adminByGroup ?? null, allowAdminByEmail]);
     if (existing.rows[0]) return existing.rows[0];
     const client = await this.database.pool.connect();
     try {
@@ -29,7 +32,7 @@ export class MemoryRepository {
          display_name=coalesce($3,users.display_name),last_login_at=now(),updated_at=now()
          RETURNING id`, [subject, profile?.email ?? null, profile?.displayName ?? null]);
       const userId = result.rows[0].id;
-      const allowlisted = profile?.email
+      const allowlisted = allowAdminByEmail && profile?.email
         ? (await client.query('SELECT 1 FROM system_admin_allowlist WHERE lower(email)=lower($1)', [profile.email])).rowCount === 1
         : false;
       if (profile?.adminByGroup === undefined) {

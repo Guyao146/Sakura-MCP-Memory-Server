@@ -1,7 +1,7 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { AppConfig, Scope } from './config.js';
-import { oidcSubject } from './security/oidc.js';
+import { oidcSubject, verifiedOidcEmail } from './security/oidc.js';
 import type { Database } from './database.js';
 
 export interface Principal {
@@ -66,7 +66,7 @@ export class AuthService {
       source: 'authentik',
       scopes: scopes as Scope[],
       expiresAt: payload.exp,
-      email: typeof payload.email === 'string' ? payload.email : undefined,
+      email: verifiedOidcEmail(payload),
       displayName: typeof payload.name === 'string' ? payload.name : typeof payload.preferred_username === 'string' ? payload.preferred_username : undefined
     };
   }

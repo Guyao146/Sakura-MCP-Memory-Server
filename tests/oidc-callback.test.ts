@@ -76,7 +76,7 @@ describe('real signed OIDC callback regression', () => {
     const s = await f.login('sakura', { email: 'admin@example.com', email_verified: false, groups: ['authentik Admins'] });
     expect(await s.result()).toMatchObject({ authSource: 'sakura', returnTo: '/admin' });
     expect(f.ensure.mock.calls[1]).toEqual([oidcSubject('sakura', origin, 'same-sub'),
-      { displayName: 'same-sub', email: undefined, adminByGroup: undefined }]);
+      { displayName: 'same-sub', email: undefined, adminByGroup: undefined, allowAdminByEmail: false }]);
     expect(createHash('sha256').update(exchanges[1].get('code_verifier')!).digest('base64url'))
       .toBe(s.authorization.searchParams.get('code_challenge'));
     expect(s.authorization.searchParams.get('code_challenge_method')).toBe('S256');
@@ -117,6 +117,31 @@ describe('real signed OIDC callback regression', () => {
   it.each([false, undefined, 'true', true])('accepts Sakura email only with boolean verification: %s', async verified => {
     const f = fixture(); await (await f.login('sakura', { email: 'owner@example.com', email_verified: verified })).result();
     expect(f.ensure.mock.calls[0][1]?.email).toBe(verified === true ? 'owner@example.com' : undefined);
+  });
+
+  it.each(['authentik', 'sakura'] as const)('only trusts explicitly verified %s email in browser login', async provider => {
+    for (const verified of [false, undefined, 'true', true]) {
+      const f = fixture();
+      await (await f.login(provider, { email: 'owner@example.com', email_verified: verified })).result();
+      expect(f.ensure.mock.calls.at(-1)?.[1]).toMatchObject({
+        email: verified === true ? 'owner@example.com' : undefined, allowAdminByEmail: verified === true
+      });
+    }
+  });
+
+  it.each([false, undefined, 'true', true])('only exposes verified Bearer email for invitation matching (%s)', async verified => {
+    const f = fixture();
+    const login = await f.login('authentik', { email: 'owner@example.com', email_verified: verified });
+    const principal = await new AuthService(f.config).authenticate(`Bearer ${login.token}`);
+    expect(principal.email).toBe(verified === true ? 'owner@example.com' : undefined);
+  });
+
+  it.each(['authentik', 'sakura'] as const)('fails closed when configured %s groups are missing or malformed', async provider => {
+    const f = fixture(); f.config[provider]!.adminGroups = ['MCP Admins'];
+    for (const groups of [undefined, null, 42, {}, []]) {
+      await (await f.login(provider, { groups })).result();
+      expect(f.ensure.mock.calls.at(-1)?.[1]?.adminByGroup).toBe(false);
+    }
   });
 
   it('rejects a forged signature before creating an identity', async () => {

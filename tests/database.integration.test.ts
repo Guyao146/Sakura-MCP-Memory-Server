@@ -160,7 +160,7 @@ describeDatabase('PostgreSQL installation integration', () => {
   });
 
   it('promotes the allowlisted Authentik email on first login', async () => {
-    const identity = await new MemoryRepository(database).ensureUser('authentik-subject-owner', { email: 'OWNER@example.com', displayName: 'Owner' });
+    const identity = await new MemoryRepository(database).ensureUser('authentik-subject-owner', { email: 'OWNER@example.com', displayName: 'Owner', allowAdminByEmail: true });
     const user = await database.query<{ is_system_admin: boolean }>('SELECT is_system_admin FROM users WHERE id=$1', [identity.userId]);
     expect(user.rows[0].is_system_admin).toBe(true);
   });
@@ -201,8 +201,38 @@ describeDatabase('PostgreSQL installation integration', () => {
     expect(await admin(member.userId)).toBe(false);
 
     // The installation administrator keeps access even when outside the admin group.
-    const owner = await repository.ensureUser('allowlisted-subject', { email: 'OWNER@example.com', displayName: 'Owner', adminByGroup: false });
+    const owner = await repository.ensureUser('allowlisted-subject', { email: 'OWNER@example.com', displayName: 'Owner', adminByGroup: false, allowAdminByEmail: true });
     expect(await admin(owner.userId)).toBe(true);
+  });
+
+  it('does not re-promote a non-admin local account through Agent profile email', async () => {
+    const local = new LocalLoginService(database);
+    const memory = new MemoryRepository(database);
+    const owner = await local.upsert('agent-email-owner', 'agent-email-password', { email: 'OWNER@example.com', isSystemAdmin: false }, true);
+    const agent = await new AgentRepository(database, encryptionKey).create(owner.userId, 'Email boundary', ['memory:read']);
+    const config = loadConfig({ PUBLIC_BASE_URL: 'https://mcp.example.com', DATABASE_URL: connectionString!, CONFIG_ENCRYPTION_KEY: encryptionKey });
+    const auth = new AuthService(config, database);
+    const isAdmin = async () => (await database.query('SELECT is_system_admin FROM users WHERE id=$1', [owner.userId])).rows[0].is_system_admin;
+    for (const stale of [true, false]) {
+      if (stale) await database.query("UPDATE users SET last_login_at=now()-interval '1 hour' WHERE id=$1", [owner.userId]);
+      const principal = await auth.authenticate(`Bearer ${agent.token}`);
+      await memory.ensureUser(principal.id, { email: principal.email, displayName: principal.displayName });
+      expect(await isAdmin()).toBe(false);
+    }
+  });
+
+  it('requires explicit email trust in both fast-path and transactional group demotion', async () => {
+    const repository = new MemoryRepository(database);
+    const profile = { email: 'OWNER@example.com', displayName: 'Email Boundary' };
+    const member = await repository.ensureUser('email-trust-boundary', profile);
+    const isAdmin = async () => (await database.query('SELECT is_system_admin FROM users WHERE id=$1', [member.userId])).rows[0].is_system_admin;
+    expect(await isAdmin()).toBe(false);
+    await repository.ensureUser('email-trust-boundary', { ...profile, allowAdminByEmail: true });
+    expect(await isAdmin()).toBe(true);
+    await repository.ensureUser('email-trust-boundary', { ...profile, adminByGroup: false });
+    expect(await isAdmin()).toBe(false);
+    await repository.ensureUser('email-trust-boundary', profile);
+    expect(await isAdmin()).toBe(false);
   });
 
   it('keeps repeated identity lookups read-only, but repairs profile, membership and expired activity', async () => {

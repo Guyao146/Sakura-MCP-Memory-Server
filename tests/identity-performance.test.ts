@@ -17,7 +17,7 @@ describe('request identity and statistical writes', () => {
     const [sql, args] = query.mock.calls[0] as unknown as [string, unknown[]];
     expect(sql).toMatch(/^SELECT /);
     for (const guard of ["sm.role='owner'", 's.deleted_at IS NULL', 'system_admin_allowlist', '$4::boolean', "interval '5 minutes'"]) expect(sql).toContain(guard);
-    expect(args).toEqual(['subject', null, null, null]);
+    expect(args).toEqual(['subject', null, null, null, false]);
   });
 
   it('falls back to transactional provisioning and authoritative group updates', async () => {
@@ -38,7 +38,7 @@ describe('request identity and statistical writes', () => {
       handlers.set(name, handler); return original.call(this, name, options, handler);
     });
     const ensure = vi.spyOn(MemoryRepository.prototype, 'ensureUser');
-    const query = vi.fn(async () => ({ rows: [] }));
+    const query = vi.fn(async (_sql: string) => ({ rows: [] }));
     const config = loadConfig({ PUBLIC_BASE_URL: 'http://localhost', DATABASE_URL: 'postgresql://unused',
       CONFIG_ENCRYPTION_KEY: Buffer.alloc(32).toString('base64url') });
     const server = createServer({ query } as never, { id: 'subject', source: 'local', scopes: ['memory:read'], expiresAt: Infinity },

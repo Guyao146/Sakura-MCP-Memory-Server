@@ -26,6 +26,26 @@ export function securityHeaders() {
   };
 }
 
+/** Public writes have no authenticated CSRF token yet. Reject cross-origin browser
+ * requests and simple form content types before reading the body. JSON clients
+ * without browser headers remain supported; this app does not enable CORS. */
+export function browserJsonWrites(publicBaseUrl: string) {
+  const expectedOrigin = new URL(publicBaseUrl).origin;
+  return async (context: Context, next: Next) => {
+    if (['GET', 'HEAD', 'OPTIONS'].includes(context.req.method)) return next();
+    const origin = context.req.header('origin');
+    const site = context.req.header('sec-fetch-site');
+    if ((origin !== undefined && origin !== expectedOrigin) || site === 'cross-site' || site === 'same-site') {
+      return context.json({ error: 'origin_forbidden', error_description: 'Same-origin requests are required.' }, 403);
+    }
+    const type = context.req.header('content-type')?.split(';')[0].trim().toLowerCase();
+    if (type !== 'application/json') {
+      return context.json({ error: 'unsupported_media_type', error_description: 'Content-Type must be application/json.' }, 415);
+    }
+    await next();
+  };
+}
+
 export class RateLimiter {
   private readonly buckets = new Map<string, Bucket>();
   constructor(private readonly windowMs = 60_000, private readonly maxBuckets = 20_000) {}

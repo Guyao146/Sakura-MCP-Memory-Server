@@ -34,7 +34,7 @@ let defaults: AppConfig;
 const signals = new Map<string, Function[]>();
 beforeAll(async () => {
   const { loadConfig } = await vi.importActual<typeof import('../src/config.js')>('../src/config.js');
-  defaults = loadConfig({ PUBLIC_BASE_URL: origin, HOST: '127.0.0.1', DATABASE_URL: 'postgresql://unused',
+  defaults = loadConfig({ PUBLIC_BASE_URL: origin, HOST: '0.0.0.0', DATABASE_URL: 'postgresql://unused',
     CONFIG_ENCRYPTION_KEY: Buffer.alloc(32, 19).toString('base64url'), WORKER_ENABLED: 'false', AUTO_MIGRATE: 'false',
     LOG_LEVEL: 'fatal', RATE_LIMIT_AUTH_PER_MINUTE: '1000' });
   state.config = { ...defaults }; state.backend = await loginDatabase();
@@ -106,7 +106,7 @@ describe('application authentication routes', () => {
       const profile = await (await request('/api/me', { headers: { Cookie: cookie } })).json();
       expect(profile).toMatchObject({ authSource: 'sakura', displayName: 'Integration Owner', email: null, isSystemAdmin: true });
       expect(state.backend.ensureUser).toHaveBeenCalledWith(oidcSubject('sakura', idp.origin, idp.subject),
-        { email: undefined, displayName: 'Integration Owner', adminByGroup: true });
+        { email: undefined, displayName: 'Integration Owner', adminByGroup: true, allowAdminByEmail: false });
       expect((await request(callback.pathname + callback.search, { headers: { Cookie: binding } })).status).toBe(401);
       const sessions = new WebSessionService(state.backend.database, () => state.config);
       const identity = await sessions.authenticate(WebSessionService.readCookie(cookie));
@@ -152,7 +152,38 @@ describe('application authentication routes', () => {
     state.completed = true; state.config.authEnabled = false; state.config.localLogin = { enabled: false };
     expect((await request('/auth/login')).headers.get('location')).toBe('/admin');
     expect(await (await request('/auth/modes')).json()).toMatchObject({ local: false, oidc: false, provider: null });
-    expect((await request('/auth/local', { method: 'POST' })).status).toBe(404);
+    expect((await request('/auth/local', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status).toBe(404);
+  });
+
+  it.each<Record<string, string>>([
+    { Origin: 'https://evil.example', 'Content-Type': 'text/plain' },
+    { Origin: 'http://localhost:9999', 'Content-Type': 'application/json' },
+    { Origin: 'null', 'Content-Type': 'application/json' },
+    { 'Sec-Fetch-Site': 'cross-site', 'Content-Type': 'application/json' },
+    { 'Sec-Fetch-Site': 'same-site', 'Content-Type': 'application/json' }
+  ])('rejects cross-origin login before checking credentials: %j', async headers => {
+    const response = await request('/auth/local', { method: 'POST', headers,
+      body: JSON.stringify({ username: 'owner', password: 'local-password-123' }) });
+    expect(response.status).toBe(403);
+    expect(response.headers.get('set-cookie')).toBeNull();
+    expect(state.backend.sessions.size).toBe(0);
+    expect(state.backend.query).not.toHaveBeenCalled();
+  });
+
+  it.each(['text/plain', 'application/x-www-form-urlencoded', 'multipart/form-data'])('rejects simple login submissions (%s)', async type => {
+    const response = await request('/auth/local', { method: 'POST', headers: { 'Content-Type': type },
+      body: JSON.stringify({ username: 'owner', password: 'local-password-123' }) });
+    expect(response.status).toBe(415);
+    expect(state.backend.sessions.size).toBe(0);
+    expect(state.backend.query).not.toHaveBeenCalled();
+  });
+
+  it('accepts same-origin browser login with a JSON charset', async () => {
+    const response = await request('/auth/local', { method: 'POST', headers: {
+      Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json; charset=UTF-8'
+    }, body: JSON.stringify({ username: 'owner', password: 'local-password-123' }) });
+    expect(response.status).toBe(200);
+    expect(state.backend.sessions.size).toBe(1);
   });
 
   it('authenticates local credentials, binds logout to CSRF and revokes the session', async () => {

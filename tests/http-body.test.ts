@@ -5,6 +5,7 @@ import { loadConfig } from '../src/config.js';
 import { McpServer, WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
 import { operationContext } from '../src/operations.js';
 import { serve } from '@hono/node-server';
+import type { ContentfulStatusCode } from 'hono/utils/http-status';
 
 const config = loadConfig({ PUBLIC_BASE_URL: 'http://localhost', DATABASE_URL: 'postgresql://unused',
   CONFIG_ENCRYPTION_KEY: Buffer.alloc(32).toString('base64url'), TRUST_PROXY: 'true',
@@ -28,7 +29,7 @@ describe('bounded lazy HTTP parsing', () => {
     const app = createHttpApp(config);
     app.post('/mcp', c => c.text('ok'));
     const parse = vi.spyOn(JSON, 'parse');
-    for (const extra of [{ host: 'evil.test' }, { origin: 'https://evil.test' }]) {
+    for (const extra of [{ host: 'evil.test' }, { origin: 'https://evil.test' }] as Record<string, string>[]) {
       expect((await app.request('/mcp', { method: 'POST', headers: { ...headers, ...extra }, body: '{}' })).status).toBe(403);
     }
     expect((await app.request('/mcp', { method: 'POST', headers, body: '{}' })).status).toBe(200);
@@ -126,9 +127,36 @@ describe('bounded lazy HTTP parsing', () => {
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
 
+  it('rejects public browser writes over real Node HTTP before entering the handler', async () => {
+    // Real fetch overwrites the forbidden Host header with the actual target, so
+    // align the configured public host as a deployment behind a proxy would.
+    const app = createHttpApp({ ...config, host: '0.0.0.0', publicBaseUrl: 'http://127.0.0.1',
+      security: { ...config.security, trustProxy: false, authPerMinute: 100 } });
+    const handler = vi.fn(async (c: import('hono').Context) => c.json(await c.req.json()));
+    app.post('/auth/local', handler);
+    const server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 0 });
+    if (!server.listening) await new Promise<void>(resolve => server.once('listening', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Missing TCP address');
+    const target = `http://127.0.0.1:${address.port}/auth/local`;
+    try {
+      const crossSite = await fetch(target, { method: 'POST', headers: { ...headers, origin: 'https://evil.example' }, body: '{}' });
+      expect(crossSite.status).toBe(403); await crossSite.text();
+      const sameSite = await fetch(target, { method: 'POST', headers: { ...headers, origin: 'http://localhost:9999' }, body: '{}' });
+      expect(sameSite.status).toBe(403); await sameSite.text();
+      const simple = await fetch(target, { method: 'POST', headers: { ...headers, 'content-type': 'text/plain' }, body: '{}' });
+      expect(simple.status).toBe(415); await simple.text();
+      expect(handler).not.toHaveBeenCalled();
+      const sameOrigin = await fetch(target, { method: 'POST', headers: { ...headers, origin: 'http://127.0.0.1' }, body: '{"ok":true}' });
+      expect(sameOrigin.status).toBe(200);
+      expect(await sameOrigin.json()).toEqual({ ok: true });
+      expect(handler).toHaveBeenCalledOnce();
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
   it('cancels a stalled upload when the application operation is aborted', async () => {
     const app = createHttpApp(config);
-    app.onError((_error, c) => c.text('cancelled', 499));
+    app.onError((_error, c) => c.text('cancelled', 499 as ContentfulStatusCode));
     const cancel = vi.fn(); const controller = new AbortController();
     let started!: () => void; const reading = new Promise<void>(resolve => { started = resolve; });
     const body = new ReadableStream<Uint8Array>({ pull() { started(); }, cancel });

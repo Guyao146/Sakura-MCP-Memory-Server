@@ -33,7 +33,9 @@ export function createServer(database: Database, principal: Principal, audit: Au
   const jobs = new JobRepository(database);
   const agents = new AgentRepository(database, getConfig().setup.encryptionKey);
   const spaces = new SpaceRepository(database);
-  const identity = requestIdentity ?? trackOperation(() => repository.ensureUser(principal.id, { email: principal.email, displayName: principal.displayName }));
+  const identity = requestIdentity ?? trackOperation(() => repository.ensureUser(principal.id, {
+    email: principal.email, displayName: principal.displayName, allowAdminByEmail: principal.source === 'authentik'
+  }));
   const requireHuman = () => {
     if (principal.source === 'api_key') throw new Error('This operation requires an interactive user.');
   };

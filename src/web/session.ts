@@ -2,7 +2,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 import { OIDC_PROVIDERS, type AppConfig, type OidcProvider, type OidcProviderConfig } from '../config.js';
 import type { Database } from '../database.js';
-import { oidcSubject } from '../security/oidc.js';
+import { oidcSubject, verifiedOidcEmail } from '../security/oidc.js';
 import { MemoryRepository } from '../memory/repository.js';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -209,14 +209,12 @@ export class WebSessionService {
     const payload = await this.verifyIdToken(code, attempt);
     const auth = this.requireProviderConfig(attempt.provider);
     if (!payload.sub) throw new Error('OIDC ID Token is missing subject.');
-    // Sakura currently emits email_verified=false. Do not use that address for
-    // allowlist promotion or invitation matching, even when it matches an admin.
-    const email = typeof payload.email === 'string' && (attempt.provider !== 'sakura' || payload.email_verified === true)
-      ? payload.email : undefined;
+    // Only verified OIDC email may participate in allowlist authorization.
+    const email = verifiedOidcEmail(payload);
     const displayName = typeof payload.name === 'string' ? payload.name : typeof payload.preferred_username === 'string' ? payload.preferred_username : payload.sub;
     const identity = await new MemoryRepository(this.database).ensureUser(oidcSubject(attempt.provider, auth.issuer, payload.sub), {
-      email, displayName, adminByGroup: adminByGroup(payload, auth, attempt.provider === 'sakura' ? [] : DEFAULT_ADMIN_GROUPS)
-        ?? (attempt.provider === 'sakura' && auth.adminGroups?.length ? false : undefined)
+      email, displayName, allowAdminByEmail: email !== undefined,
+      adminByGroup: adminByGroup(payload, auth, attempt.provider === 'sakura' ? [] : DEFAULT_ADMIN_GROUPS)
     });
     return this.issueSession(identity.userId, attempt.return_to, attempt.provider);
   }
@@ -425,9 +423,8 @@ export const DEFAULT_ADMIN_GROUPS = ['authentik Admins'];
  * - Without configuration the built-in superuser group only ever promotes,
  *   returning undefined on a miss so that manually granted administrators and
  *   the allowlist keep working.
- * - The Sakura callback treats a missing groups claim as a denial when explicit
- *   adminGroups are configured; Authentik retains its legacy missing-claim rule.
- * - Returns undefined when the provider emitted no usable groups claim.
+ * - With explicit adminGroups, missing or malformed claims deny group access.
+ *   Returns undefined for unusable claims only without explicit configuration.
  *
  * `defaultGroups` exists because only Authentik has a well-known built-in
  * superuser group; SakuraID administrators define their own group names, so a
@@ -439,7 +436,7 @@ export function adminByGroup(payload: JWTPayload, auth: OidcProviderConfig, defa
   const expected = configured.length ? configured : defaultGroups.map(group => group.toLowerCase());
   const raw = payload[auth.groupsClaim ?? 'groups'];
   const groups = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(/[,\s]+/) : undefined;
-  if (!groups) return undefined;
+  if (!groups) return configured.length ? false : undefined;
   const actual = groups.filter((group): group is string => typeof group === 'string').map(group => group.trim().toLowerCase());
   const matched = actual.some(group => expected.includes(group));
   if (matched) return true;

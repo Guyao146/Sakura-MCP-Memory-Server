@@ -1,7 +1,7 @@
 import type { AppConfig } from '../config.js';
 import { Hono, type Context, type Next } from 'hono';
 import { hostHeaderValidation, localhostOriginValidation } from '@modelcontextprotocol/hono';
-import { RateLimiter, securityHeaders } from './http.js';
+import { RateLimiter, securityHeaders, browserJsonWrites } from './http.js';
 import { operationSignal } from '../operations.js';
 
 /** Keep SDK host/origin protection without its eager, cloned JSON parser. */
@@ -17,6 +17,8 @@ export function createHttpApp(config: AppConfig) {
   app.use('/api/setup/*', limiter.middleware('setup', config.security.setupPerMinute, config.security.trustProxy));
   app.use('/api/admin/*', limiter.middleware('web', config.security.webPerMinute, config.security.trustProxy));
   app.use('/api/me/*', limiter.middleware('account', config.security.authPerMinute, config.security.trustProxy));
+  app.use('/auth/local', browserJsonWrites(config.publicBaseUrl));
+  app.use('/api/setup/*', browserJsonWrites(config.publicBaseUrl));
   app.use('*', boundedBody(config.security.maxBodyBytes));
   return app;
 }

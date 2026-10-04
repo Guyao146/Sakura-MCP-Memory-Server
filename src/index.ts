@@ -648,7 +648,9 @@ async function handleMcp(context: Context): Promise<Response> {
   }
   const parsedBody = await readMcpBody(context);
   if (parsedBody instanceof Response) return parsedBody;
-  const identity = trackOperation(() => memories.ensureUser(principal.id, { email: principal.email, displayName: principal.displayName }));
+  const identity = trackOperation(() => memories.ensureUser(principal.id, {
+    email: principal.email, displayName: principal.displayName, allowAdminByEmail: principal.source === 'authentik'
+  }));
   // Session tracking is best-effort telemetry: never let it fail a real request.
   const tracker = await identity.then(({ userId }) => beginClientTracking(context, principal, userId, parsedBody)).catch(error => {
     logger.warn({ err: error }, 'Client session tracking failed');

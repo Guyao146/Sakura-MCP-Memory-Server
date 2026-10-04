@@ -241,7 +241,7 @@ describe('Web management security', () => {
     expect(adminByGroup({ groups: ['Users', 'sakura admins'] }, auth)).toBe(true);
     expect(adminByGroup({ groups: ['Users'] }, auth)).toBe(false);
     expect(adminByGroup({ groups: 'Users Sakura Admins' }, { ...auth, adminGroups: ['Users'] })).toBe(true);
-    expect(adminByGroup({ groups: ['Sakura Admins'] }, { ...auth, groupsClaim: 'roles' })).toBeUndefined();
+    expect(adminByGroup({ groups: ['Sakura Admins'] }, { ...auth, groupsClaim: 'roles' })).toBe(false);
     expect(adminByGroup({ roles: ['Sakura Admins'] }, { ...auth, groupsClaim: 'roles' })).toBe(true);
   });
 
@@ -257,11 +257,11 @@ describe('Web management security', () => {
     expect(adminByGroup({ groups: ['authentik Admins'] }, { ...auth, adminGroups: ['Sakura Admins'] })).toBe(false);
   });
 
-  it('falls back to the allowlist when groups are unusable', () => {
+  it('fails closed for unusable configured groups while preserving unconfigured roles', () => {
     const auth = { issuer: 'https://login.example.com', audience: 'mcp', jwksUri: 'https://login.example.com/jwks/',
       scopeClaim: 'scope', clientId: 'client-id' };
     expect(adminByGroup({}, auth)).toBeUndefined();
-    expect(adminByGroup({}, { ...auth, adminGroups: ['Sakura Admins'] })).toBeUndefined();
+    expect(adminByGroup({}, { ...auth, adminGroups: ['Sakura Admins'] })).toBe(false);
     expect(adminByGroup({ groups: [42] }, { ...auth, adminGroups: ['Sakura Admins'] })).toBe(false);
     expect(adminByGroup({ groups: [42] }, auth)).toBeUndefined();
   });
