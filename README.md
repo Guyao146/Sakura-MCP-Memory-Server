@@ -808,6 +808,6 @@ PostgreSQL 测试则需要通过 `DATABASE_TEST_URL` 指向**全新、可丢弃�
 
 ## 许可证
 
-Sakura-License v1.2（审阅稿）：源码可用、受覆盖衍生作品共享、保留署名、特定商用需取得授权；正文见 [`LICENSE`](LICENSE)，采用声明见 [`NOTICE`](NOTICE)。该许可限制特定商业利用，属于源码可用（source-available）许可证，不是 OSI 批准的开源许可证。
+Sakura-License v1.2：源码可用、受覆盖衍生作品共享、保留署名、特定商用需取得授权；正文见 [`LICENSE`](LICENSE)，采用声明见 [`NOTICE`](NOTICE)。该许可限制特定商业利用，属于源码可用（source-available）许可证，不是 OSI 批准的开源许可证。
 
-历史版本按 LGPL-2.1 授予接收者的权利不追溯撤销；第三方依赖不因分发而改用本许可。许可证导读与采用指引见 [Sakura-License v1.2 审阅稿](https://wiki.mcylyr.cn/#/../licenses/Sakura-License-1.2-draft)。
+历史版本按 LGPL-2.1 授予接收者的权利不追溯撤销；第三方依赖不因分发而改用本许可。许可证正文与采用指引见 [Sakura-License v1.2](https://wiki.mcylyr.cn/#/../licenses/Sakura-License-1.2)。

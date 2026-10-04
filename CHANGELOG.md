@@ -6,7 +6,7 @@
 
 ### 变更
 
-- 项目许可证由 LGPL-2.1-only 改为 **Sakura-License v1.2 审阅稿**：仓库根 `LICENSE` 替换为正文全文，新增 `NOTICE` 按采用指引记录权属主体、适用范围、固定版本、生效边界与历史权利；`package.json` 与 `tools/cline-sync` 的 `license` 字段改为 `SEE LICENSE IN LICENSE`。历史版本按 LGPL-2.1 已授予接收者的权利不追溯撤销，第三方依赖保持各自许可。v1.2 现为审阅稿，正式固定版本发布后另行替换。
+- 项目许可证由 LGPL-2.1-only 改为 **Sakura-License v1.2** 正式固定版本（文本标识 `Sakura-License-1.2`，2026-10-04 发布，条文与审阅稿修订 3 逐字一致）：仓库根 `LICENSE` 为正文全文，`NOTICE` 按采用指引记录权属主体、适用范围、固定版本、生效边界与历史权利；`package.json` 与 `tools/cline-sync` 的 `license` 字段为 `SEE LICENSE IN LICENSE`。采用声明自首次同时包含 `LICENSE` 与 `NOTICE` 的提交起生效，曾使用的审阅稿正文已替换为固定正文；历史版本按 LGPL-2.1 已授予接收者的权利不追溯撤销，第三方依赖保持各自许可。
 
 ### 新增
 

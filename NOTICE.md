@@ -19,9 +19,9 @@
 
 ## 固定许可版本
 
-- 许可正文：`LICENSE`，当前为 **Sakura-License v1.2 审阅稿**（文本标识 `Sakura-License-1.2-draft`，审阅修订 3，修订日期 2026-10-02）。
-- 该许可限制特定商业利用，属于源码可用（source-available）许可证，不是 OSI 批准的开源许可证，也没有 SPDX 短标识；在物料清单中引用写作 `LicenseRef-Sakura-License-1.2-draft`。
-- v1.2 正文自身声明其为拟议文本。权利主体在此作出明确采用声明：自本仓库首次同时包含本声明与该 `LICENSE` 的提交起，对本作品适用 Sakura-License v1.2 审阅稿；正式固定版本发布后将按采用指引整体替换 `LICENSE`，不影响已授予的权利。
+- 许可正文：`LICENSE`，为 **Sakura-License v1.2** 正式固定版本（文本标识 `Sakura-License-1.2`，发布日期 2026-10-04；条文与审阅稿修订 3 逐字一致，仅标题、文本标识、前言与状态表述不同）。
+- 该许可限制特定商业利用，属于源码可用（source-available）许可证，不是 OSI 批准的开源许可证，也没有 SPDX 短标识；在物料清单中引用写作 `LicenseRef-Sakura-License-1.2`。
+- 固定正文规定：本许可不因存放而自动适用于任何项目，仅当有权许可的主体就其作品作出明确采用声明时，才对采用声明列出的作品生效。权利主体在此声明：自本仓库首次同时包含采用声明与 `LICENSE` 的提交起，对本作品适用 Sakura-License v1.2。采用声明生效期间曾使用审阅稿正文，现替换为正式固定正文；已授予的权利不因替换而改变。
 - npm 元数据：`package.json` 与 `tools/cline-sync/package.json` 的 `license` 字段写作 `SEE LICENSE IN LICENSE`。
 
 ## 生效边界
