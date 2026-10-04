@@ -1,13 +1,28 @@
 export const accountSecurityHtml = `
-<style>#security label,#localAccountDialog label{display:block;margin:12px 0}#security input,#localAccountDialog input:not([type=checkbox]){display:block;width:100%;margin-top:5px}#localAccountDialog input[type=checkbox]{min-width:0}</style>
-<section id="security"><h1>账号安全中心</h1>
+<style>
+#security label,#localAccountDialog label{display:block;margin:12px 0}
+#security input,#localAccountDialog input:not([type=checkbox]){display:block;width:100%;margin-top:7px;min-width:0}
+#localAccountDialog input[type=checkbox]{min-width:0}
+#security>p.muted{max-width:760px;line-height:1.9;margin-bottom:24px}
+#passwordForm{border-top:1px solid var(--line);margin-top:26px;padding-top:12px}
+.password-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:12px}
+.security-badge{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;line-height:1.5;padding:4px 9px;border-radius:7px;border:1px solid #655377;background:#33283f;color:#eed3f6;vertical-align:middle}
+.security-badge.current{background:#19372f;border-color:#356051;color:#a6e8c8}.security-badge.locked{background:#482936;border-color:#774256;color:#ffc5d4}
+.security-title{display:flex;align-items:center;flex-wrap:wrap;gap:10px;font-weight:650;margin-bottom:8px}
+.security-meta{display:flex;flex-wrap:wrap;gap:4px 18px;color:var(--muted);font-size:12px;line-height:1.8}
+#webSessionList .item.current-session{border-color:#476353;background:linear-gradient(110deg,#1b292b,#181c2a)}
+.security-empty{padding:26px;text-align:center;border:1px dashed var(--line);border-radius:14px;color:var(--muted)}
+@media(max-width:1000px){.password-fields{grid-template-columns:minmax(0,1fr);gap:0}.security-meta{display:grid;gap:4px}}
+@media(max-width:760px){#webSessionList .item-main{flex-basis:100%}}
+</style>
+<section id="security"><p class="page-eyebrow">ACCOUNT / SECURITY</p><h1>账号安全中心</h1>
 <p class="muted">各登录来源的账号独立，不自动合并。以下操作不撤销 Agent Key；请在 Agent 密钥页面单独管理。</p>
 <div id="selfSecurity" class="box"><h2>我的登录会话</h2><p class="muted">最多展示最近 200 个有效会话。这里只退出本站会话，不退出上游身份服务；已有 SSO 登录可能再次进入本站。</p>
 <div class="toolbar"><button class="secondary" onclick="loadSecurity()">刷新</button><button class="danger" onclick="revokeOtherSessions()">退出其他会话</button></div><div id="webSessionList" class="list"></div>
 <form id="passwordForm" onsubmit="event.preventDefault();changeOwnPassword()" style="display:none"><h2>修改本地密码</h2><p class="muted">修改后包括当前会话在内的所有本地会话都会退出，请重新登录。</p>
-<label>当前密码<input id="currentPassword" type="password" autocomplete="current-password" required maxlength="200"></label>
+<div class="password-fields"><label>当前密码<input id="currentPassword" type="password" autocomplete="current-password" required maxlength="200"></label>
 <label>新密码<input id="newPassword" type="password" autocomplete="new-password" required minlength="8" maxlength="200"></label>
-<label>确认新密码<input id="confirmPassword" type="password" autocomplete="new-password" required minlength="8" maxlength="200"></label>
+<label>确认新密码<input id="confirmPassword" type="password" autocomplete="new-password" required minlength="8" maxlength="200"></label></div>
 <button id="changePasswordButton" type="submit">修改密码并退出</button></form></div>
 <div id="localAccountAdmin" class="box" style="display:none;margin-top:16px"><h2>本地账号管理</h2><p id="localLoginNotice" class="muted"></p>
 <p class="muted">用户名不区分大小写。删除只移除本地登录凭据，保留用户、记忆和 Agent Key；不能删除或降权最后一个未锁定的本地管理员。</p>
@@ -23,19 +38,29 @@ export const accountSecurityHtml = `
 export const accountSecurityScript = `
 let localAccounts=[],accountMode='create';
 function securityButton(label,action,danger=false){const b=document.createElement('button');b.textContent=label;b.className=danger?'danger':'secondary';b.onclick=action;return b}
+function securityText(tag,className,value){const node=document.createElement(tag);node.className=className;node.textContent=value;return node}
+function securityEmpty(id,message){if(!$(id).children.length)$(id).append(securityText('div','security-empty',message))}
 async function loadSecurity(){
   $('selfSecurity').style.display=state.authEnabled?'block':'none';
   $('passwordForm').style.display=state.authEnabled&&state.localLogin&&state.me.authSource==='local'?'block':'none';
   $('localAccountAdmin').style.display=state.me.isSystemAdmin?'block':'none';
   $('localLoginNotice').textContent=state.localLogin?'本地登录已启用。':'本地登录未启用：管理凭据不会自动启用登录。';
   try{if(state.authEnabled){const d=await api('/api/me/sessions');$('webSessionList').innerHTML='';
-    for(const s of d.sessions){const item=document.createElement('div');item.className='item';const text=document.createElement('div');
-      text.textContent=(s.current?'当前会话 · ':'')+s.authSource+' · 创建 '+new Date(s.createdAt).toLocaleString()+' · 最近活动 '+new Date(s.lastSeenAt).toLocaleString()+' · 到期 '+new Date(s.expiresAt).toLocaleString();
-      item.append(text,securityButton(s.current?'退出当前会话':'退出',()=>revokeWebSession(s.id),true));$('webSessionList').append(item)}}
+    for(const s of d.sessions){const item=document.createElement('div');item.className='item'+(s.current?' current-session':'');const text=document.createElement('div');text.className='item-main';
+      const title=securityText('div','security-title',({local:'本地账号',sakura:'Sakura',authentik:'Authentik'}[s.authSource]||'登录')+'会话');
+      if(s.current)title.append(securityText('span','security-badge current','当前会话'));
+      const meta=document.createElement('div');meta.className='security-meta';
+      for(const [label,value] of [['创建于',s.createdAt],['最近活动',s.lastSeenAt],['到期时间',s.expiresAt]])meta.append(securityText('span','',label+' '+new Date(value).toLocaleString()));
+      text.append(title,meta);item.append(text,securityButton(s.current?'退出当前会话':'退出',()=>revokeWebSession(s.id),true));$('webSessionList').append(item)}
+      securityEmpty('webSessionList','暂无有效会话。')}
     if(state.me.isSystemAdmin){const d=await api('/api/admin/local-users');localAccounts=d.users;$('localUserList').innerHTML='';
-      for(const u of localAccounts){const item=document.createElement('div');item.className='item';const text=document.createElement('div');
-        text.textContent=u.displayName+' ('+u.username+') · '+(u.isSystemAdmin?'管理员':'用户')+' · '+(new Date(u.lockedUntil)>new Date()?'已锁定':'未锁定')+' · 失败次数 '+u.failedAttempts;
-        const actions=document.createElement('div');actions.className='actions';actions.append(securityButton('编辑',()=>openLocalAccount(u,'edit')),securityButton('重置密码',()=>openLocalAccount(u,'reset')),securityButton('解锁',()=>localAccountAction(u,'unlock')),securityButton('删除凭据',()=>localAccountAction(u,'delete'),true));item.append(text,actions);$('localUserList').append(item)}}
+      for(const u of localAccounts){const item=document.createElement('div');item.className='item';const text=document.createElement('div');text.className='item-main';
+        const title=securityText('div','security-title',u.displayName+' ('+u.username+')');
+        title.append(securityText('span','security-badge',u.isSystemAdmin?'管理员':'用户'));
+        const locked=new Date(u.lockedUntil)>new Date();title.append(securityText('span','security-badge '+(locked?'locked':'current'),locked?'已锁定':'未锁定'));
+        text.append(title,securityText('div','security-meta','失败次数 '+u.failedAttempts));
+        const actions=document.createElement('div');actions.className='actions';actions.append(securityButton('编辑',()=>openLocalAccount(u,'edit')),securityButton('重置密码',()=>openLocalAccount(u,'reset')),securityButton('解锁',()=>localAccountAction(u,'unlock')),securityButton('删除凭据',()=>localAccountAction(u,'delete'),true));item.append(text,actions);$('localUserList').append(item)}
+      securityEmpty('localUserList','暂无本地账号。创建后可在这里管理本地登录凭据。')}
   }catch(e){toast(e.message,true)}
 }
 async function revokeOtherSessions(){if(!confirm('退出此账号的其他本站会话？不影响 Agent Key 或上游 SSO。'))return;try{await api('/api/me/sessions/revoke-others',{method:'POST'});await loadSecurity();toast('其他会话已退出')}catch(e){toast(e.message,true)}}

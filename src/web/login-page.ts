@@ -1,3 +1,5 @@
+import { loginPolishStyles } from './design.js';
+
 /**
  * Branded login landing page. `/auth/login` renders this page instead of
  * redirecting straight to Authentik so that a signed-out visitor sees an
@@ -68,6 +70,7 @@ h1{font-size:20px;font-weight:700;margin:0 0 7px}
 .themes button.on{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
 .foot{margin:20px 0 0;padding-top:18px;border-top:1px solid var(--line);font-size:12px;color:var(--muted);line-height:1.7}
 .version{font:500 11px ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--muted)}
+${loginPolishStyles}
 @media(max-width:899px){body{grid-template-columns:1fr}.brand-panel{display:none}.side{padding:24px 20px}.compact-brand{display:flex}}
 </style></head><body>
 <section class="brand-panel">
@@ -249,6 +252,7 @@ button:disabled{opacity:.5;cursor:not-allowed;filter:none}
 .foot{margin-top:26px;font-size:12px;color:var(--muted);line-height:1.7}
 .foot a{color:var(--accent)}
 .version{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+${loginPolishStyles}
 @media(max-width:899px){body{grid-template-columns:1fr}.brand-panel{display:none}.side{padding:24px 20px}.compact-brand{display:flex}}
 </style></head>
 <body>
@@ -300,7 +304,7 @@ var notice=notices[params.get('reason')];
 if(notice){$('notice').textContent=notice;$('notice').style.display='block'}
 $('localForm').addEventListener('submit',function(event){
   event.preventDefault();
-  var button=$('submitButton');button.disabled=true;
+  var button=$('submitButton');button.disabled=true;button.textContent='正在登录…';
   var body={username:$('username').value.trim(),password:$('password').value,return_to:safeTarget};
   fetch('/auth/local',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){
     return r.json().then(function(d){return {ok:r.ok,data:d}})
@@ -312,7 +316,7 @@ $('localForm').addEventListener('submit',function(event){
     $('password').focus();
   }).catch(function(){
     $('notice').textContent='网络错误，请稍后重试。';$('notice').style.display='block'
-  }).finally(function(){button.disabled=false});
+  }).finally(function(){button.disabled=false;button.textContent='登录'});
 });
 var choice='auto';
 try{choice=localStorage.getItem('sakura-theme')||'auto'}catch(e){}

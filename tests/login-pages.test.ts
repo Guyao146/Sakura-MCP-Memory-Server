@@ -10,16 +10,16 @@ class Element {
   style: Record<string, string> = {}; dataset: Record<string, string> = {};
   classes = new Set<string>();
   classList = { toggle: (name: string, on: boolean) => on ? this.classes.add(name) : this.classes.delete(name) };
-  listeners = new Map<string, () => unknown>();
+  listeners = new Map<string, (event: { preventDefault(): void }) => unknown>();
   siblings: Element[] = [];
   parentNode = { insertBefore: (node: Element, next: Element | null) => {
     node.siblings = this.siblings;
     this.siblings.splice(next ? this.siblings.indexOf(next) : this.siblings.length, 0, node);
   } };
   get nextSibling() { return this.siblings[this.siblings.indexOf(this) + 1] ?? null; }
-  addEventListener(name: string, callback: () => unknown) { this.listeners.set(name, callback); }
+  addEventListener(name: string, callback: (event: { preventDefault(): void }) => unknown) { this.listeners.set(name, callback); }
   focus() {}
-  async fire(name: string) { await this.listeners.get(name)?.(); }
+  async fire(name: string) { await this.listeners.get(name)?.({ preventDefault() {} }); }
 }
 const flush = async () => { for (let i = 0; i < 3; i++) await new Promise(resolve => setImmediate(resolve)); };
 function page(html: string, fetcher: typeof fetch, script?: string) {
@@ -71,6 +71,21 @@ describe('shipped page scripts', () => {
     expect(methods).toEqual(['local', 'sakura', 'authentik'].filter(name => modes[name as 'local' | 'sakura' | 'authentik']));
     expect(p.location.href).toBe('');
     expect(fetcher.mock.calls.every(([url]) => ['/auth/modes', '/health'].includes(String(url)))).toBe(true);
+  });
+
+  it('shows pending login feedback and restores the button after a failed request', async () => {
+    let resolve!: (response: Response) => void;
+    const pending = new Promise<Response>(r => { resolve = r; });
+    const p = page(localLoginPage, vi.fn(async url => String(url) === '/auth/local' ? pending : Response.json({})));
+    p.get('username').value = 'owner'; p.get('password').value = 'wrong-password';
+    await p.get('localForm').fire('submit');
+    expect(p.get('submitButton').disabled).toBe(true);
+    expect(p.get('submitButton').textContent).toBe('正在登录…');
+    resolve(Response.json({ error_description: '登录失败' }, { status: 400 })); await flush();
+    expect(p.get('submitButton').disabled).toBe(false);
+    expect(p.get('submitButton').textContent).toBe('登录');
+    expect(p.get('password').value).toBe('');
+    expect(p.get('notice').textContent).toBe('登录失败');
   });
 
   it('inserts Sakura then Authentik after the local form', async () => {

@@ -31,14 +31,34 @@ describe('account security shipped UI', () => {
   });
   it('renders untrusted profile data as text and loads admin controls only for admins', async () => {
     const p = page(); await p.run('loadSecurity()');
-    expect(p.get('localUserList').children[0].children[0].textContent).toContain('<img');
-    expect(p.get('localUserList').children[0].children[0].innerHTML).toBe('');
+    expect(p.get('localUserList').children[0].children[0].children[0].textContent).toContain('<img');
+    expect(p.get('localUserList').children[0].children[0].children[0].innerHTML).toBe('');
     const user = page(false); await user.run('loadSecurity()');
     expect(user.get('localAccountAdmin').style.display).toBe('none');
     expect(user.api.mock.calls.map(c => c[0])).toEqual(['/api/me/sessions']);
     const open = page(true, false); await open.run('loadSecurity()');
     expect(open.get('selfSecurity').style.display).toBe('none');
     expect(open.api.mock.calls.map(c => c[0])).toEqual(['/api/admin/local-users']);
+  });
+  it('separates session metadata and current / locked badges without relying on color alone', async () => {
+    const p = page(); p.user.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+    await p.run('loadSecurity()');
+    const session = p.get('webSessionList').children[0];
+    expect(session.className).toContain('current-session');
+    const [title, meta] = session.children[0].children;
+    expect(title.textContent).toBe('本地账号会话');
+    expect(title.children[0].textContent).toBe('当前会话');
+    expect(meta.children).toHaveLength(3);
+    expect(meta.children[1].textContent).toContain('最近活动');
+    const accountTitle = p.get('localUserList').children[0].children[0].children[0];
+    expect(accountTitle.children.map(child => child.textContent)).toEqual(['管理员', '已锁定']);
+    expect(accountTitle.children[1].className).toContain('locked');
+  });
+  it('shows explicit empty states for accounts and sessions', async () => {
+    const p = page(); p.api.mockImplementation(async path => path === '/api/me/sessions' ? { sessions: [] } : { users: [] });
+    await p.run('loadSecurity()');
+    expect(p.get('webSessionList').children[0].textContent).toBe('暂无有效会话。');
+    expect(p.get('localUserList').children[0].className).toBe('security-empty');
   });
   it('validates confirmation then submits password change and clears secrets', async () => {
     const p = page(); p.get('currentPassword').value = 'old-password'; p.get('newPassword').value = 'new-password';

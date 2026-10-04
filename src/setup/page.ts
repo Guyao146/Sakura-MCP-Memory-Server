@@ -1,4 +1,6 @@
-﻿export const setupPage = `<!doctype html>
+import { setupPolishStyles } from './design.js';
+
+export const setupPage = `<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -6,6 +8,7 @@
   <style>
     [hidden]{display:none!important}
     :root{color-scheme:dark;--bg:#0c1017;--card:#151b26;--line:#293244;--text:#edf2fa;--muted:#99a6ba;--accent:#e58aa3;--ok:#67d6a3;--bad:#ff7b86}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0,#252039 0,transparent 35%),var(--bg);font:15px/1.6 system-ui,sans-serif;color:var(--text)}main{max-width:920px;margin:auto;padding:48px 20px 80px}header{margin-bottom:28px}h1{font-size:34px;margin:0 0 8px}.brand{color:var(--accent)}.sub{color:var(--muted)}.steps{display:flex;gap:8px;margin:24px 0}.step{height:5px;flex:1;background:var(--line);border-radius:8px}.step.active{background:var(--accent)}section{display:none;background:rgba(21,27,38,.94);border:1px solid var(--line);border-radius:18px;padding:26px;box-shadow:0 16px 50px #0005}section.active{display:block}h2{margin-top:0}h3{margin:24px 0 10px}label{display:block;margin:13px 0 5px;color:#cbd5e5}input,select{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:9px;background:#0e141e;color:var(--text)}input:focus{outline:2px solid #e58aa355;border-color:var(--accent)}.grid{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}.actions{display:flex;justify-content:space-between;gap:12px;margin-top:26px}button{border:0;border-radius:9px;padding:11px 18px;font-weight:650;cursor:pointer;background:var(--accent);color:#22141a}button.secondary{background:#293244;color:var(--text)}button:disabled{opacity:.45;cursor:not-allowed}.result{white-space:pre-wrap;background:#0e141e;border:1px solid var(--line);border-radius:9px;padding:12px;margin-top:14px;color:var(--muted);min-height:48px}.ok{color:var(--ok)}.bad{color:var(--bad)}.notice{padding:12px 14px;border-left:3px solid var(--accent);background:#251d29;border-radius:5px}.check{display:flex;gap:9px;align-items:center;margin:14px 0}.check input{width:auto}.hidden{display:none}@media(max-width:650px){.grid{grid-template-columns:1fr}main{padding-top:28px}section{padding:20px}}
+    ${setupPolishStyles}
   </style>
 </head>
 <body><main>
