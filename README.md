@@ -362,7 +362,7 @@ docker compose up -d
 `docker-compose.yml` 是生产编排文件，默认直接拉取：
 
 ```text
-ghcr.io/guyao146/sakura-mcp-server:0.4.0
+ghcr.io/guyao146/sakura-mcp-server:0.4.1
 ```
 
 如果 GHCR Package 设置为 Public，服务器无需 `docker login`。首次发布后请在 GitHub 仓库的 **Packages → sakura-mcp-server → Package settings** 中确认可见性为 **Public**。
@@ -392,7 +392,7 @@ docker compose up -d
 生产 Compose 不需要本地 Dockerfile、Node.js、npm 或完整源码。镜像版本通过 `.env` 覆盖：
 
 ```dotenv
-SAKURA_MCP_IMAGE=ghcr.io/guyao146/sakura-mcp-server:0.4.0
+SAKURA_MCP_IMAGE=ghcr.io/guyao146/sakura-mcp-server:0.4.1
 ```
 
 如果需要固定到其他已发布版本，只需修改 `SAKURA_MCP_IMAGE`，然后执行 `docker compose pull && docker compose up -d`。
@@ -742,7 +742,7 @@ npm.cmd start
 
 ## 当前开发状态
 
-`v0.1.0` 是早期安全 MCP 网关版本；当前 `main` 的应用版本为 `v0.4.0`，对应 GHCR 镜像 `ghcr.io/guyao146/sakura-mcp-server:0.4.0`（另有 `latest`）和生产 Compose 部署版本。
+`v0.1.0` 是早期安全 MCP 网关版本；当前 `main` 的应用版本为 `v0.4.1`，对应 GHCR 镜像 `ghcr.io/guyao146/sakura-mcp-server:0.4.1`（另有 `latest`）和生产 Compose 部署版本。
 
 已完成：
 
@@ -776,7 +776,14 @@ npm.cmd start
 
 ## 自动测试与发布
 
-推送分支会执行类型检查、单元测试和 Docker 构建。推送 `v*` tag 后自动运行测试、生成 npm tarball 并创建 GitHub Release，同时为 `linux/amd64` 与 `linux/arm64` 构建 GHCR 镜像，以版本号（如 `0.4.0`）和 `latest` 发布；发布镜像与本地 Dockerfile 构建内容一致，CI 会先行验证 Compose 与镜像构建。GHCR Package 默认继承仓库可见性，首次发布后可在 **Packages → Package settings** 中确认为 Public，使服务器无需 `docker login`。
+推送分支会执行类型检查、单元测试和 Docker 构建。推送 `v*` tag 后自动运行测试、生成 npm tarball 并创建 GitHub Release，同时为 `linux/amd64` 与 `linux/arm64` 构建 GHCR 镜像，以版本号（如 `0.4.1`）和 `latest` 发布；发布镜像与本地 Dockerfile 构建内容一致，CI 会先行验证 Compose 与镜像构建。GHCR Package 默认继承仓库可见性，首次发布后可在 **Packages → Package settings** 中确认为 Public，使服务器无需 `docker login`。
+
+### 浏览器请求与身份声明边界
+
+- `/auth/local` 和 `/api/setup/*` 的写请求必须使用 `Content-Type: application/json`。浏览器 Origin 必须与 `PUBLIC_BASE_URL` 的源（协议、主机、端口）一致；跨站及跨子域提交均拒绝。反向代理应正确配置公开 URL，不以内部 HTTP 地址或客户端自报的转发头替代它。无浏览器来源头的 JSON 命令行请求仍可使用。
+- Authentik/Sakura 的邮箱只有在令牌携带布尔型 `email_verified: true` 时才作为受信邮箱使用；未验证或缺失标记不参与邮箱白名单授权和邀请匹配。Agent 请求中的存储邮箱仅是资料，不会触发管理员提权。
+- 显式配置管理员组后，缺失、无效或不匹配的组声明都会在下次浏览器登录时撤销组授权（受信邮箱白名单例外）；未配置组时保留原有手工授权兼容规则。
+- 升级前请确认 IdP 的邮箱验证/组映射，保留一个可用的本地管理员或已验证的外部管理员。此次不会批量清除历史角色或会话；如曾依赖未经验证的邮箱授权，应复核管理员账号并按需撤销访问。首次安装接口仍属于首次运行配置入口，安装完成前应限制网络访问；来源校验不是安装口令。
 
 ### 身份认证回归与隔离联调
 

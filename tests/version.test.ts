@@ -4,7 +4,7 @@ import { APP_VERSION, compareVersions, UpdateChecker } from '../src/version.js';
 
 describe('application version and update checks', () => {
   it('uses the released semantic version and compares versions', () => {
-    expect(APP_VERSION).toBe('0.4.0');
+    expect(APP_VERSION).toBe('0.4.1');
     expect(compareVersions('0.3.4', '0.3.3')).toBe(1);
     expect(compareVersions('0.3.4', '0.3.4')).toBe(0);
     expect(compareVersions('0.3.3', '0.3.4')).toBe(-1);
@@ -12,9 +12,29 @@ describe('application version and update checks', () => {
     expect(compareVersions('1.0.0', '1.0.0-beta.1')).toBe(1);
   });
 
-  it('keeps the runtime version aligned with package metadata', async () => {
-    const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
+  it('keeps the runtime version aligned with package metadata and deployment defaults', async () => {
+    const [packageText, lockText, compose, environment] = await Promise.all([
+      '../package.json', '../package-lock.json', '../docker-compose.yml', '../.env.example'
+    ].map(file => readFile(new URL(file, import.meta.url), 'utf8')));
+    const packageJson = JSON.parse(packageText) as { version: string };
+    const lock = JSON.parse(lockText) as { version: string; packages: Record<string, { version: string }> };
     expect(APP_VERSION).toBe(packageJson.version);
+    expect(lock.version).toBe(APP_VERSION);
+    expect(lock.packages[''].version).toBe(APP_VERSION);
+    for (const text of [compose, environment]) {
+      expect(text).toContain(`ghcr.io/guyao146/sakura-mcp-server:${APP_VERSION}`);
+    }
+  });
+
+  it('includes the adopted license and notice in both npm and container distributions', async () => {
+    const [packageText, dockerfile, ignore] = await Promise.all([
+      '../package.json', '../Dockerfile', '../.dockerignore'
+    ].map(file => readFile(new URL(file, import.meta.url), 'utf8')));
+    const packageJson = JSON.parse(packageText) as { files: string[] };
+    expect(packageJson.files).toEqual(expect.arrayContaining(['LICENSE', 'NOTICE.md']));
+    const runtime = dockerfile.split(/FROM node:24-bookworm-slim\r?\n/)[1];
+    expect(runtime).toContain('COPY LICENSE NOTICE.md ./');
+    for (const file of ['LICENSE', 'NOTICE.md']) expect(ignore.split(/\r?\n/)).toContain('!' + file);
   });
 
   it('checks the latest GitHub release and caches the result', async () => {

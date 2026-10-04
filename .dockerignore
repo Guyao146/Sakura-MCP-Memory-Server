@@ -4,6 +4,8 @@
 !.dockerignore
 !package.json
 !package-lock.json
+!LICENSE
+!NOTICE.md
 !tsconfig.json
 !src/
 !src/**
