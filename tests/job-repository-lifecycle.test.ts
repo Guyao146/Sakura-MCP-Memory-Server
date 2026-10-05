@@ -17,6 +17,8 @@ describe('job ownership and recovery queries', () => {
       expect(values).toContain('owner');
     }
     expect(query.mock.calls[3][0]).toContain("WHEN cancel_requested THEN 'cancelled'");
+    // Import checkpoints update DB progress per item; a later failure must not overwrite it with the claimed snapshot.
+    for (const index of [3,4]) expect(query.mock.calls[index][0]).toContain("progress=CASE WHEN job_type='import_v2' THEN progress ELSE $3::jsonb END");
     expect(query.mock.calls[4][0]).toContain('attempts=GREATEST(0,attempts-1)');
   });
 
@@ -28,7 +30,7 @@ describe('job ownership and recovery queries', () => {
     const recovery = query.mock.calls[1][0];
     expect(recovery).toContain("WHEN cancel_requested THEN 'cancelled'");
     expect(recovery).toContain("WHEN attempts>=max_attempts THEN 'failed'");
-    expect(recovery).toContain("job_type='rebuild_embeddings'");
+    expect(recovery).toContain("job_type IN ('rebuild_embeddings','import_v2')");
     expect(query.mock.calls[2][0]).toContain('FOR UPDATE SKIP LOCKED');
     expect(release).toHaveBeenCalledTimes(1);
   });

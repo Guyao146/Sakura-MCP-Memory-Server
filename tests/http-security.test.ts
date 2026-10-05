@@ -37,7 +37,8 @@ describe('HTTP production security', () => {
     const policy = (await app.request('https://mcp.example.com/auth/login')).headers.get('content-security-policy') ?? '';
     expect(policy).toContain("style-src 'self' 'unsafe-inline'");
     expect(policy).toContain("font-src 'self'");
-    expect(policy).toContain("script-src 'self' 'unsafe-inline';");
+    expect(policy).toContain("script-src 'self' 'sha256-");
+    expect(policy).not.toContain("script-src 'self' 'unsafe-inline'");
     expect(policy).toContain("connect-src 'self'");
     expect(policy).not.toContain('script-src \'self\' \'unsafe-inline\' https://api.mcylyr.cn');
   });
@@ -55,6 +56,15 @@ describe('HTTP production security', () => {
     expect(limited.status).toBe(429);
     expect(limited.headers.get('retry-after')).toBeTruthy();
     await expect(limited.json()).resolves.toMatchObject({ error: 'rate_limited' });
+  });
+
+  it('does not trust a client-controlled forwarding chain or malformed address', async () => {
+    const app = new Hono();
+    app.use('*', new RateLimiter().middleware('proxy-chain', 1, true));
+    app.get('/', context => context.text('ok'));
+    for (const [address, status] of [['203.0.113.1, 198.51.100.10', 200], ['203.0.113.2, 198.51.100.10', 429], ['not-an-ip', 429]] as const) {
+      expect((await app.request('/', { headers: { 'X-Forwarded-For': address } })).status).toBe(status);
+    }
   });
 
   it('keeps trusted proxy clients in separate buckets', async () => {

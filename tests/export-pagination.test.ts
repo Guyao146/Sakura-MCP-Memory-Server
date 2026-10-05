@@ -68,6 +68,23 @@ describe('paginated export', () => {
     expect(markdown.content.match(/^## /gm)).toHaveLength(4);
   });
 
+  it('preserves microsecond precision in export cursors across pages', async () => {
+    const calls:unknown[][]=[];
+    const query=vi.fn(async(sql:string,args:unknown[])=>{
+      if(sql.includes('SELECT sm.role'))return {rows:[{role:'owner'}]};
+      if(sql.includes('FROM spaces WHERE'))return {rows:[{name:'test',description:''}]};
+      calls.push(args);expect(sql).toContain('m.created_at::text AS created_at');
+      return {rows:calls.length===1?[{...memory(1),created_at:'2026-01-01 00:00:00.123456+00'}]:[]};
+    });
+    const result=await new MemoryTransferService({query} as never,{} as never,{} as never).export('u','s','json',{batchSize:1});
+    expect(result.rowCount).toBe(1);expect(calls[1][1]).toBe('2026-01-01 00:00:00.123456+00');
+  });
+
+  it('rejects oversized buffered exports instead of building an unbounded response',async()=>{
+    const memories=Array.from({length:18},(_,i)=>({...memory(i),content:'x'.repeat(1000000)}));
+    await expect(new MemoryTransferService(fakeDatabase(memories).database,{} as never,{} as never).export('u','s','json')).rejects.toThrow('16 MiB');
+  });
+
   it('produces an empty export for an empty space', async () => {
     const { database } = fakeDatabase([]);
     const transfer = new MemoryTransferService(database, {} as never, {} as never);

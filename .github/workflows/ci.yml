@@ -36,7 +36,11 @@ jobs:
       - name: Check cline-sync tool
         working-directory: tools/cline-sync
         run: npm ci && npm run check
+      - name: Build and browser regression
+        run: npm run build && BROWSER_PATH=$(command -v google-chrome) node scripts/browser-check.mjs
       - run: docker build --tag sakura-mcp-server:ci .
+      - name: Verify runtime has no package managers
+        run: docker run --rm --entrypoint node sakura-mcp-server:ci -e "const fs=require('node:fs'); for (const path of ['/usr/local/lib/node_modules/npm','/usr/local/lib/node_modules/corepack']) { if(fs.existsSync(path)) throw Error(path); }"
       - name: Validate Docker Compose
         env:
           POSTGRES_PASSWORD: ci-compose-password

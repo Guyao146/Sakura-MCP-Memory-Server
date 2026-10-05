@@ -61,14 +61,17 @@ export class MemoryRepository {
     const client = await this.database.pool.connect();
     try {
       await client.query('BEGIN');
+      await client.query('SELECT id FROM spaces WHERE id=$1 AND deleted_at IS NULL FOR NO KEY UPDATE',[input.spaceId]);
+      const membership=await client.query('SELECT role FROM space_members WHERE space_id=$1 AND user_id=$2',[input.spaceId,userId]);
+      if(!['owner','admin','editor','contributor'].includes(membership.rows[0]?.role))throw new Error('Space access denied.');
       const memory = await client.query<MemoryRecord>(
-        `INSERT INTO memories(space_id,type,content,summary,tags,importance,confidence,sensitivity,valid_from,valid_until,expires_at,created_by)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+        `INSERT INTO memories(space_id,type,content,summary,tags,importance,confidence,sensitivity,valid_from,valid_until,expires_at,created_by,status)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
         [input.spaceId, input.type, input.content, input.summary ?? '', input.tags ?? [], input.importance ?? 0.5,
-          input.confidence ?? 1, input.sensitivity ?? 0, input.validFrom ?? null, input.validUntil ?? null, input.expiresAt ?? null, userId]);
-      if (input.source) await client.query(
+          input.confidence ?? 1, input.sensitivity ?? 0, input.validFrom ?? null, input.validUntil ?? null, input.expiresAt ?? null, userId, input.status ?? 'active']);
+      for (const source of input.sources ?? (input.source ? [input.source] : [])) await client.query(
         `INSERT INTO memory_sources(memory_id,source_type,source_uri,source_agent,excerpt,metadata) VALUES($1,$2,$3,$4,$5,$6)`,
-        [memory.rows[0].id, input.source.type, input.source.uri ?? null, input.source.agent ?? null, input.source.excerpt ?? null, input.source.metadata ?? {}]);
+        [memory.rows[0].id, source.type, source.uri ?? null, source.agent ?? null, source.excerpt ?? null, source.metadata ?? {}]);
       await client.query(`INSERT INTO memory_versions(memory_id,version,snapshot,changed_by,reason) VALUES($1,1,$2,$3,'created')`, [memory.rows[0].id, memory.rows[0], userId]);
       await client.query('COMMIT');
       return memory.rows[0];
@@ -113,12 +116,16 @@ export class MemoryRepository {
     const client = await this.database.pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query('SELECT id FROM memories WHERE id=$1 FOR UPDATE', [memoryId]);
+      await client.query('SELECT id FROM spaces WHERE id=$1 FOR UPDATE',[current.space_id]);
+      await client.query('SELECT id FROM memories WHERE id=$1 AND deleted_at IS NULL FOR UPDATE', [memoryId]);
+      const membership=await client.query('SELECT role FROM space_members WHERE space_id=$1 AND user_id=$2',[current.space_id,userId]);
+      if(!['owner','admin','editor'].includes(membership.rows[0]?.role))throw new Error('Space access denied.');
       const version = await client.query<{ next: number }>('SELECT coalesce(max(version),0)+1 AS next FROM memory_versions WHERE memory_id=$1', [memoryId]);
       const result = await client.query<MemoryRecord>(
         `UPDATE memories SET content=coalesce($2,content),summary=coalesce($3,summary),tags=coalesce($4,tags),
          importance=coalesce($5,importance),confidence=coalesce($6,confidence),status=coalesce($7::memory_status,status),updated_at=now()
-         WHERE id=$1 RETURNING *`, [memoryId, patch.content ?? null, patch.summary ?? null, patch.tags ?? null, patch.importance ?? null, patch.confidence ?? null, patch.status ?? null]);
+         WHERE id=$1 AND deleted_at IS NULL RETURNING *`, [memoryId, patch.content ?? null, patch.summary ?? null, patch.tags ?? null, patch.importance ?? null, patch.confidence ?? null, patch.status ?? null]);
+      if(!result.rows[0])throw new Error('Memory was deleted during the update.');
       await client.query('INSERT INTO memory_versions(memory_id,version,snapshot,changed_by,reason) VALUES($1,$2,$3,$4,$5)', [memoryId, version.rows[0].next, result.rows[0], userId, reason]);
       await client.query('COMMIT'); return result.rows[0];
     } catch (error) { await client.query('ROLLBACK'); throw error; }
@@ -128,7 +135,18 @@ export class MemoryRepository {
   async forget(userId: string, memoryId: string, permanent: boolean): Promise<void> {
     const current = await this.get(userId, memoryId);
     await requireSpaceRole(this.database, userId, current.space_id, permanent ? 'admin' : 'editor');
-    if (permanent) await this.database.query('DELETE FROM memories WHERE id=$1', [memoryId]);
-    else await this.database.query(`UPDATE memories SET status='deleted',deleted_at=now(),updated_at=now() WHERE id=$1`, [memoryId]);
+    const client=await this.database.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT id FROM spaces WHERE id=$1 FOR UPDATE',[current.space_id]);
+      const role=await client.query('SELECT role FROM space_members WHERE space_id=$1 AND user_id=$2',[current.space_id,userId]);
+      if(!(permanent?['owner','admin']:['owner','admin','editor']).includes(role.rows[0]?.role))throw new Error('Space access denied.');
+      if(permanent)await client.query('DELETE FROM memories WHERE id=$1',[memoryId]);
+      else {
+        const row=await client.query(`UPDATE memories SET status='deleted',deleted_at=now(),updated_at=now() WHERE id=$1 AND deleted_at IS NULL RETURNING *`,[memoryId]);
+        if(row.rows[0])await client.query(`INSERT INTO memory_versions(memory_id,version,snapshot,changed_by,reason) SELECT $1,coalesce(max(version),0)+1,$2,$3,'deleted' FROM memory_versions WHERE memory_id=$1`,[memoryId,row.rows[0],userId]);
+      }
+      await client.query('COMMIT');
+    }catch(error){await client.query('ROLLBACK');throw error;}finally{client.release();}
   }
 }

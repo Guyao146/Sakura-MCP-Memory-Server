@@ -28,6 +28,18 @@ describe('Provider request lifetime', () => {
     }
   });
 
+  it('does not send a Provider request after cancellation during quota admission',async()=>{
+    const {providerScope}=await import('../src/providers/metrics.js');
+    const controller=new AbortController();
+    const query=vi.fn(async(sql:string)=>{
+      if(sql==='COMMIT')controller.abort(new Error('cancelled during quota'));
+      return {rows:sql.includes('max_provider_calls_daily')?[{max_provider_calls_daily:10}]:[{calls:1}]};
+    });
+    const fetch=vi.fn();vi.stubGlobal('fetch',fetch);
+    await expect(providerScope.run({database:{pool:{connect:async()=>({query,release(){}})}} as never,spaceId:'s'},()=>providers[0].embed(['x'],undefined,controller.signal))).rejects.toThrow('cancelled during quota');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('disposes all listeners/deadlines over 100 successful calls', async () => {
     vi.useFakeTimers(); const parent = new AbortController();
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{"data":[{"index":0,"embedding":[1]}]}')));

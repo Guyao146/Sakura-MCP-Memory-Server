@@ -1,3 +1,5 @@
+import { scriptPolicy } from './pages.js';
+import { isIP } from 'node:net';
 import type { Context, Next } from 'hono';
 import { getConnInfo } from '@hono/node-server/conninfo';
 
@@ -20,7 +22,7 @@ export function securityHeaders() {
     context.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
     context.header('Cross-Origin-Opener-Policy', 'same-origin');
     context.header('Cross-Origin-Resource-Policy', 'same-origin');
-    context.header('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    context.header('Content-Security-Policy', "default-src 'self'; " + scriptPolicy + "; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     if (new URL(context.req.url).protocol === 'https:') context.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     context.header('Cache-Control', context.req.path === '/health' ? 'no-store' : context.res.headers.get('Cache-Control') ?? 'no-store');
   };
@@ -89,8 +91,11 @@ export class RateLimiter {
 
 function clientAddress(context: Context, trustProxy: boolean): string {
   if (trustProxy) {
-    const forwarded = context.req.header('x-forwarded-for')?.split(',')[0]?.trim();
-    if (forwarded) return forwarded.slice(0, 128);
+    // Only accept one address supplied by an edge that overwrites this header.
+    // Never interpret an unvalidated client-controlled forwarding chain.
+    const forwarded = context.req.header('x-forwarded-for')?.trim();
+    if (forwarded && isIP(forwarded)) return forwarded;
+    return 'invalid-proxy-address';
   }
   return getConnInfo(context).remote.address?.slice(0, 128) ?? 'direct-client';
 }

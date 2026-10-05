@@ -1,3 +1,4 @@
+import { ImportQueue } from '../transfer/queue.js';
 import { randomUUID } from 'node:crypto';
 import type { Database } from '../database.js';
 import type { SemanticMemoryService } from '../semantic/service.js';
@@ -74,6 +75,7 @@ export class BackgroundWorker {
       await heartbeat(); // Check cancellation before making any Provider call.
       controller.signal.throwIfAborted();
       if (job.job_type === 'rebuild_embeddings') await this.rebuild(job, controller.signal);
+      else if(job.job_type==='import_v2') await new ImportQueue(this.database).execute(job,this.id,controller.signal,this.semantic);
       else throw new Error(`Unsupported background job type: ${job.job_type}`);
       controller.signal.throwIfAborted();
       await this.jobs.complete(job.id, job.progress, this.id);

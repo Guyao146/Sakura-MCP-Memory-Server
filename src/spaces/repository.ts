@@ -38,16 +38,26 @@ export class SpaceRepository {
   }
 
   async invite(userId: string, spaceId: string, email: string, role: Exclude<SpaceRole, 'owner'>, expiresInHours: number) {
-    await requireSpaceRole(this.database, userId, spaceId, 'admin');
-    const token = randomBytes(32).toString('base64url');
-    const tokenHash = createHash('sha256').update(token).digest('hex');
-    const result = await this.database.query<{ id: string; expires_at: string }>(
-      `INSERT INTO space_invitations(space_id,email,role,invited_by,token_hash,expires_at)
-       VALUES($1,lower($2),$3,$4,$5,now()+($6 || ' hours')::interval)
-       ON CONFLICT(space_id,lower(email)) WHERE accepted_at IS NULL DO UPDATE
-       SET role=EXCLUDED.role,invited_by=EXCLUDED.invited_by,token_hash=EXCLUDED.token_hash,expires_at=EXCLUDED.expires_at
-       RETURNING id,expires_at`, [spaceId, email, role, userId, tokenHash, expiresInHours]);
-    return { invitationId: result.rows[0].id, token, expiresAt: result.rows[0].expires_at };
+    const client=await this.database.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const space=await client.query('SELECT type FROM spaces WHERE id=$1 AND deleted_at IS NULL FOR NO KEY UPDATE',[spaceId]);
+      const member=await client.query<{role:SpaceRole}>('SELECT role FROM space_members WHERE space_id=$1 AND user_id=$2',[spaceId,userId]);
+      const actorRole=member.rows[0]?.role;
+      if(!actorRole||!['owner','admin'].includes(actorRole))throw new Error('Space access denied.');
+      if(role==='admin'&&actorRole!=='owner')throw new Error('Only owners may invite administrators.');
+      if(space.rows[0]?.type!=='shared')throw new Error('Invitations are only supported for shared spaces.');
+      const token = randomBytes(32).toString('base64url');
+      const tokenHash = createHash('sha256').update(token).digest('hex');
+      const result = await client.query<{ id: string; expires_at: string }>(
+        `INSERT INTO space_invitations(space_id,email,role,invited_by,token_hash,expires_at)
+         VALUES($1,lower($2),$3,$4,$5,now()+($6 || ' hours')::interval)
+         ON CONFLICT(space_id,lower(email)) WHERE accepted_at IS NULL DO UPDATE
+         SET role=EXCLUDED.role,invited_by=EXCLUDED.invited_by,token_hash=EXCLUDED.token_hash,expires_at=EXCLUDED.expires_at,revoked_at=NULL
+         RETURNING id,expires_at`, [spaceId, email, role, userId, tokenHash, expiresInHours]);
+      await client.query('COMMIT');
+      return { invitationId: result.rows[0].id, token, expiresAt: result.rows[0].expires_at };
+    }catch(error){await client.query('ROLLBACK');throw error;}finally{client.release();}
   }
 
   async accept(userId: string, email: string | undefined, token: string) {
@@ -56,17 +66,24 @@ export class SpaceRepository {
     const client = await this.database.pool.connect();
     try {
       await client.query('BEGIN');
-      const invitation = await client.query<{ id: string; space_id: string; role: SpaceRole }>(
-        `SELECT id,space_id,role FROM space_invitations WHERE token_hash=$1 AND lower(email)=lower($2)
-         AND accepted_at IS NULL AND expires_at>now() FOR UPDATE`, [tokenHash, email]);
+      const lookup=await client.query<{space_id:string}>('SELECT space_id FROM space_invitations WHERE token_hash=$1',[tokenHash]);
+      if(!lookup.rows[0])throw new Error('Invitation is invalid.');
+      const space=await client.query('SELECT id FROM spaces WHERE id=$1 AND deleted_at IS NULL AND type=\'shared\' FOR NO KEY UPDATE',[lookup.rows[0].space_id]);
+      if(!space.rows[0])throw new Error('Invitation space is unavailable.');
+      const invitation = await client.query<{ id: string; space_id: string; role: SpaceRole; invited_by:string }>(
+        `SELECT id,space_id,role,invited_by FROM space_invitations WHERE token_hash=$1 AND lower(email)=lower($2)
+         AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>now() FOR UPDATE`, [tokenHash, email]);
       if (!invitation.rows[0]) throw new Error('Invitation is invalid, expired, already used, or belongs to another email.');
+      const sender=await client.query<{role:SpaceRole}>('SELECT role FROM space_members WHERE space_id=$1 AND user_id=$2',[invitation.rows[0].space_id,invitation.rows[0].invited_by]);
+      if(!['owner','admin'].includes(sender.rows[0]?.role)||invitation.rows[0].role==='admin'&&sender.rows[0]?.role!=='owner')throw new Error('Invitation issuer no longer has permission.');
       await client.query(
         `INSERT INTO space_members(space_id,user_id,role) VALUES($1,$2,$3)
-         ON CONFLICT(space_id,user_id) DO UPDATE SET role=EXCLUDED.role`,
+         ON CONFLICT(space_id,user_id) DO NOTHING`,
         [invitation.rows[0].space_id, userId, invitation.rows[0].role]);
       await client.query('UPDATE space_invitations SET accepted_at=now() WHERE id=$1', [invitation.rows[0].id]);
+      const memberRole=await client.query<{role:SpaceRole}>('SELECT role FROM space_members WHERE space_id=$1 AND user_id=$2',[invitation.rows[0].space_id,userId]);
       await client.query('COMMIT');
-      return { spaceId: invitation.rows[0].space_id, role: invitation.rows[0].role };
+      return { spaceId: invitation.rows[0].space_id, role: memberRole.rows[0]?.role??invitation.rows[0].role };
     } catch (error) { await client.query('ROLLBACK'); throw error; }
     finally { client.release(); }
   }

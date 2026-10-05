@@ -71,14 +71,19 @@ export class MemoryGovernanceService {
   }
 
   async resolve(userId: string, conflictId: string, resolution: ConflictResolution, merged?: { content: string; summary?: string; tags?: string[] }) {
+    const initial=await this.database.query<{space_id:string}>('SELECT space_id FROM memory_conflicts WHERE id=$1',[conflictId]);
+    if(!initial.rows[0])throw new Error('Open conflict not found.');
+    await requireSpaceRole(this.database,userId,initial.rows[0].space_id,'editor');
     const client = await this.database.pool.connect();
     try {
       await client.query('BEGIN');
+      await client.query('SELECT id FROM spaces WHERE id=$1 FOR UPDATE',[initial.rows[0].space_id]);
       const result = await client.query<{ space_id: string; memory_a_id: string; memory_b_id: string; status: string }>(
         `SELECT space_id,memory_a_id,memory_b_id,status FROM memory_conflicts WHERE id=$1 FOR UPDATE`, [conflictId]);
       const conflict = result.rows[0];
       if (!conflict || conflict.status !== 'open') throw new Error('Open conflict not found.');
-      await requireSpaceRole(this.database, userId, conflict.space_id, 'editor');
+      const currentMembers=await client.query<{role:string}>('SELECT role FROM space_members WHERE space_id=$1 AND user_id=$2',[conflict.space_id,userId]);
+      if(!['owner','admin','editor'].includes(currentMembers.rows[0]?.role))throw new Error('Space access denied.');
       if (resolution === 'keep_a' || resolution === 'keep_b') {
         const winner = resolution === 'keep_a' ? conflict.memory_a_id : conflict.memory_b_id;
         const loser = resolution === 'keep_a' ? conflict.memory_b_id : conflict.memory_a_id;

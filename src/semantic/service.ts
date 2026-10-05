@@ -1,3 +1,4 @@
+import { providerScope } from '../providers/metrics.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { operationSignal } from '../operations.js';
 import type { AppConfig } from '../config.js';
@@ -107,6 +108,19 @@ export class SemanticMemoryService {
     const resolved = await this.resolve(userId, spaceId, 'chat');
     if (!resolved) throw new Error('This space has no Chat Provider configured.');
     return resolved.provider.extractMemories(text, resolved.chatModel);
+  }
+
+  /** Only the importer may finish embedding its committed record with contributor rights. */
+  async embedImportedMemory(userId: string, memoryId: string, signal: AbortSignal) {
+    signal.throwIfAborted();
+    const memory = await this.repository.get(userId, memoryId);
+    await requireSpaceRole(this.database, userId, memory.space_id, 'contributor');
+    if (memory.created_by !== userId) throw new Error('Only the importer may finish this embedding.');
+    const status = await this.embedMemory(userId, memory, signal).catch(() => {
+      signal.throwIfAborted();
+      return 'failed';
+    });
+    return { memoryId, status };
   }
 
   async rebuildEmbedding(userId: string, memoryId: string, signal?: AbortSignal): Promise<{ memoryId: string; status: string }> {
@@ -248,7 +262,7 @@ export class SemanticMemoryService {
     const strategy = await this.strategy(userId, spaceId);
     if (capability === 'embedding' && !strategy.provider_type && !strategy.privacy_mode) {
       const dedicated = createEmbeddingProvider(this.getConfig(), { embeddingModel: strategy.embedding_model ?? undefined });
-      if (dedicated?.embeddingModel) return dedicated;
+      if (dedicated?.embeddingModel) return this.scopedProvider(spaceId,dedicated);
     }
     let kind = strategy.provider_type;
     if (!kind) {
@@ -259,7 +273,16 @@ export class SemanticMemoryService {
     const resolved = createProvider(this.getConfig(), kind, { chatModel: strategy.chat_model ?? undefined, embeddingModel: strategy.embedding_model ?? undefined });
     if (capability === 'chat' && !resolved.chatModel) return undefined;
     if (capability === 'embedding' && !resolved.embeddingModel) return undefined;
-    return resolved;
+    return this.scopedProvider(spaceId,resolved);
+  }
+
+  private scopedProvider(spaceId: string,resolved: ResolvedProvider): ResolvedProvider {
+    const scope={database:this.database,spaceId};
+    const original=resolved.provider;
+    return {...resolved,provider:{
+      embed:(...args)=>providerScope.run(scope,()=>original.embed(...args)),
+      extractMemories:(...args)=>providerScope.run(scope,()=>original.extractMemories(...args))
+    }};
   }
 }
 

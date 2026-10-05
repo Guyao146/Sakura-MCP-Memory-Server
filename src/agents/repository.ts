@@ -48,6 +48,12 @@ export class AgentRepository {
     return result.rows;
   }
 
+  async page(ownerId:string,page=1) {
+    const result=await this.database.query(`SELECT id,name,key_prefix,scopes,expires_at,revoked_at,last_used_at,created_at,
+      count(*) OVER()::text AS total FROM agent_credentials WHERE owner_id=$1 ORDER BY created_at DESC,id DESC LIMIT 50 OFFSET $2`,[ownerId,(page-1)*50]);
+    return {agents:result.rows,page};
+  }
+
   /**
    * Permanently deletes an Agent credential. Space grants cascade, while
    * memories and audit entries keep their history with the Agent reference set

@@ -1,3 +1,5 @@
+import { ImportQueue } from './transfer/queue.js';
+import { MemoryManagement,browseSchema } from './memory/management.js';
 import { McpServer, ResourceTemplate, type ServerContext } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import type { Principal } from './auth.js';
@@ -190,6 +192,31 @@ export function createServer(database: Database, principal: Principal, audit: Au
     const spaceId = args.space_id ?? personalSpaceId;
     await requireAgentSpaceScope(database, principal.agentId, spaceId, 'memory:write');
     return transfer.import(userId, spaceId, args.format, args.content, principal.id);
+  }));
+
+  server.registerTool('memory_import_queue', {
+    description:'Preview or enqueue a durable import. Explicit human credentials required; completed items are never replayed.',
+    inputSchema:{space_id:z.uuid(),format:z.enum(['json','markdown']),content:z.string().min(1).max(5000000),preview:z.boolean().default(true),duplicates:z.enum(['skip','keep']).default('skip')}
+  },guarded('memory_import_queue',['memory:write'],async(args,userId)=>{
+    requireHuman();
+    const queue=new ImportQueue(database);
+    if(args.preview)return queue.preview(userId,args.space_id,args.format,args.content);
+    if(!getConfig().worker.enabled)throw new Error('Worker is disabled.');
+    return queue.enqueue(userId,args.space_id,args.format,args.content,args.duplicates);
+  }));
+  server.registerTool('memory_browse',{
+    description:'Browse memories with pagination and filters, including archived records and trash.',
+    inputSchema:browseSchema.shape
+  },guarded('memory_browse',['memory:read'],async(args,userId)=>{
+    await requireAgentSpaceScope(database,principal.agentId,args.space_id,'memory:read');
+    return new MemoryManagement(database).browse(userId,args);
+  }));
+  server.registerTool('memory_history',{
+    description:'Read version metadata for one memory, without restoring it.',inputSchema:{memory_id:z.uuid(),page:z.number().int().min(1).max(100000).default(1)}
+  },guarded('memory_history',['memory:read'],async(args,userId)=>{
+    const service=new MemoryManagement(database),memory=await service.detail(userId,args.memory_id);
+    await requireAgentSpaceScope(database,principal.agentId,memory.space_id,'memory:read');
+    return service.history(userId,args.memory_id,args.page);
   }));
 
   server.registerTool('memory_import_status', {

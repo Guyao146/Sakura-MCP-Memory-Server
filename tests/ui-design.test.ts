@@ -29,12 +29,12 @@ describe('shared UI presentation', () => {
 
   it('preserves every navigation target and hides administrator-only navigation initially', () => {
     const views = [...navigationHtml.matchAll(/data-view="([^"]+)"/g)].map(match => match[1]);
-    expect(views).toHaveLength(12);
+    expect(views).toHaveLength(13);
     for (const view of views) expect(adminPage).toContain(`<section id="${view}"`);
     expect(navigationHtml.match(/aria-current="page"/g)).toHaveLength(1);
     expect(navigationHtml).toContain('id="authentikNav" style="display:none"');
     expect(navigationHtml).toContain('id="providerNav" style="display:none"');
-    expect(navigationHtml.match(/aria-hidden="true" focusable="false"/g)).toHaveLength(12);
+    expect(navigationHtml.match(/aria-hidden="true" focusable="false"/g)).toHaveLength(13);
   });
 
   it('keeps About available to all users with only project metadata and safe links', () => {

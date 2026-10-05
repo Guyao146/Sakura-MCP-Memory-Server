@@ -355,7 +355,7 @@ describe('Web management security', () => {
   });
 
   it('contains syntactically valid browser JavaScript', () => {
-    const script = adminPage.match(/<script>([\s\S]*)<\/script>/)?.[1];
+    const script = adminPage.match(/<script>([\s\S]*?)<\/script>/)?.[1];
     expect(script).toBeTruthy();
     expect(() => new Script(script!)).not.toThrow();
   });

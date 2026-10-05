@@ -64,6 +64,16 @@ async function request(path: string, init?: RequestInit) {
 }
 
 describe('application authentication routes', () => {
+  it('protects new management endpoints with production session and CSRF middleware',async()=>{
+    expect((await request('/api/admin/library')).status).toBe(401);
+    const web=new WebSessionService(state.backend.database,()=>state.config);
+    const session=await web.issueSession('local-user','/admin','local',state.backend.credential.version);
+    const cookie='sakura_session='+session.token;
+    expect((await request('/api/admin/library/batch',{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/json'},body:'{}'})).status).toBe(403);
+    state.completed=false;
+    expect((await request('/api/admin/operations',{headers:{Cookie:cookie}})).status).toBe(503);
+  });
+
   it.skipIf(!process.env.SAKURA_AUTH_SOURCE)('exchanges a real Sakura authorization code and confirms upstream logout in an isolated IdP', async () => {
     const idp = await startSakura(process.env.SAKURA_AUTH_SOURCE!, `${origin}/auth/callback`);
     try {

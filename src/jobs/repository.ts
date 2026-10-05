@@ -2,7 +2,7 @@ import type { Database } from '../database.js';
 import { requireAgentSpaceScope, requireSpaceRole } from '../memory/permissions.js';
 
 export interface BackgroundJob {
-  id: string; space_id: string; requested_by: string; job_type: string; payload: Record<string, unknown>;
+  id: string; space_id: string; requested_by: string; job_type: string; source_type?: string; payload: Record<string, unknown>;
   status: 'pending'|'processing'|'completed'|'failed'|'cancelled'; progress: Record<string, unknown>;
   attempts: number; max_attempts: number; cancel_requested: boolean;
 }
@@ -39,7 +39,7 @@ export class JobRepository {
 
   async cancel(userId: string, jobId: string, agentId?: string) {
     const job = await this.get(userId, jobId, agentId, 'space:manage');
-    await requireSpaceRole(this.database, userId, job.space_id, 'admin');
+    await requireSpaceRole(this.database, userId, job.space_id, job.job_type==='import_v2'&&job.requested_by===userId?'contributor':'admin');
     const result = await this.database.query(
       `UPDATE ingestion_jobs SET cancel_requested=true,
        status=CASE WHEN status='pending' THEN 'cancelled' ELSE status END,updated_at=now()
@@ -50,13 +50,23 @@ export class JobRepository {
 
   async retry(userId: string, jobId: string, agentId?: string) {
     const job = await this.get(userId, jobId, agentId, 'space:manage');
-    await requireSpaceRole(this.database, userId, job.space_id, 'admin');
-    const result = await this.database.query(
-      `UPDATE ingestion_jobs SET status='pending',attempts=0,available_at=now(),locked_at=NULL,locked_by=NULL,
-       cancel_requested=false,error=NULL,progress=jsonb_set(progress,'{errors}','[]'::jsonb),updated_at=now()
-       WHERE id=$1 AND status IN ('failed','cancelled') RETURNING *`, [jobId]);
-    if (!result.rows[0]) throw new Error('Only failed or cancelled jobs can be retried.');
-    return result.rows[0];
+    if(job.job_type==='memory_import') throw new Error('Legacy imports cannot be retried; submit the original file again.');
+    await requireSpaceRole(this.database, userId, job.space_id, job.job_type==='import_v2'&&job.requested_by===userId?'contributor':'admin');
+    const client=await this.database.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const locked=await client.query('SELECT job_type FROM ingestion_jobs WHERE id=$1 FOR UPDATE',[jobId]);
+      if(!locked.rows[0])throw new Error('Job not found.');
+      if(locked.rows[0].job_type==='import_v2') {
+        const items=await client.query('SELECT 1 FROM import_items WHERE job_id=$1 LIMIT 1',[jobId]);
+        if(!items.rows.length)throw new Error('Import payload expired; submit the original file again.');
+      }
+      const result=await client.query(`UPDATE ingestion_jobs SET status='pending',attempts=0,available_at=now(),locked_at=NULL,locked_by=NULL,
+        cancel_requested=false,error=NULL,progress=jsonb_set(progress,'{errors}','[]'::jsonb),updated_at=now()
+        WHERE id=$1 AND status IN ('failed','cancelled') RETURNING *`,[jobId]);
+      if(!result.rows[0])throw new Error('Only failed or cancelled jobs can be retried.');
+      await client.query('COMMIT');return result.rows[0];
+    } catch(error){await client.query('ROLLBACK');throw error;}finally{client.release();}
   }
 
   async claim(workerId: string, staleAfterSeconds: number): Promise<BackgroundJob | undefined> {
@@ -67,11 +77,11 @@ export class JobRepository {
         `UPDATE ingestion_jobs SET status=CASE WHEN cancel_requested THEN 'cancelled'
            WHEN attempts>=max_attempts THEN 'failed' ELSE 'pending' END,
          locked_at=NULL,locked_by=NULL,available_at=now(),updated_at=now()
-         WHERE status='processing' AND job_type='rebuild_embeddings'
+         WHERE status='processing' AND job_type IN ('rebuild_embeddings','import_v2')
            AND locked_at < now()-($1||' seconds')::interval`, [staleAfterSeconds]);
       const result = await client.query<BackgroundJob>(
         `SELECT * FROM ingestion_jobs WHERE status='pending' AND available_at<=now() AND cancel_requested=false
-         AND attempts<max_attempts AND job_type IN ('rebuild_embeddings') ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1`);
+         AND attempts<max_attempts AND job_type IN ('rebuild_embeddings','import_v2') ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1`);
       const job = result.rows[0];
       if (!job) { await client.query('COMMIT'); return undefined; }
       const claimed = await client.query<BackgroundJob>(
@@ -101,7 +111,7 @@ export class JobRepository {
   async release(job: BackgroundJob, workerId: string): Promise<void> {
     await this.database.query(
       `UPDATE ingestion_jobs SET status=CASE WHEN cancel_requested THEN 'cancelled' ELSE 'pending' END,
-       progress=$3,attempts=GREATEST(0,attempts-1),available_at=now(),locked_at=NULL,locked_by=NULL,updated_at=now()
+       progress=CASE WHEN job_type='import_v2' THEN progress ELSE $3::jsonb END,attempts=GREATEST(0,attempts-1),available_at=now(),locked_at=NULL,locked_by=NULL,updated_at=now()
        WHERE id=$1 AND locked_by=$2 AND status='processing'`, [job.id, workerId, job.progress]);
   }
 
@@ -116,7 +126,7 @@ export class JobRepository {
     await this.database.query(
       `UPDATE ingestion_jobs SET status=CASE WHEN cancel_requested THEN 'cancelled'
          WHEN attempts<max_attempts THEN 'pending' ELSE 'failed' END,
-       error=$2,progress=$3,available_at=now()+($4||' seconds')::interval,
+       error=$2,progress=CASE WHEN job_type='import_v2' THEN progress ELSE $3::jsonb END,available_at=now()+($4||' seconds')::interval,
        locked_at=NULL,locked_by=NULL,updated_at=now() WHERE id=$1 AND locked_by=$5 AND status='processing'`,
       [job.id, error, progress, Math.min(300, 2 ** job.attempts * 5), workerId]);
   }

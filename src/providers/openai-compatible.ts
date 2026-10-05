@@ -36,7 +36,14 @@ export class OpenAICompatibleProvider implements AiProvider {
 
 async function describeUpstreamError(response: Response): Promise<string> {
   let raw = '';
-  try { raw = (await response.text()).slice(0, 500); }
+  const pieces: string[]=[];
+  let consumed=0;
+  if(!response.body)return '';
+  const reader=response.body.getReader();
+  try {
+    while(consumed<1024){const {done,value}=await reader.read();if(done)break;const chunk=value.subarray(0,1024-consumed);pieces.push(Buffer.from(chunk).toString('utf8'));consumed+=chunk.length;}
+  } finally {await reader.cancel().catch(()=>undefined);reader.releaseLock();}
+  try { raw = pieces.join('').slice(0, 500); }
   catch { return ''; }
   if (!raw.trim()) return '';
   let detail = raw;

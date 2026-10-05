@@ -6,7 +6,11 @@ import type { SemanticMemoryService } from '../semantic/service.js';
 import type { MemoryGovernanceService } from '../governance/service.js';
 import { operationSignal } from '../operations.js';
 
-const importMemorySchema = z.object({
+export const importMemorySchema = z.object({
+  status: z.enum(['active','pending_confirmation','archived','superseded']).default('active'),
+  sources: z.array(z.object({type:z.string().min(1).max(120),uri:z.string().max(2000).nullish().transform(x=>x??undefined),
+    agent:z.string().max(500).nullish().transform(x=>x??undefined),excerpt:z.string().max(10000).nullish().transform(x=>x??undefined),
+    metadata:z.record(z.string(),z.unknown()).optional()})).max(100).optional(),
   type: z.enum(['fact','preference','event','task','person','project','summary','document','idea','other']).default('other'),
   content: z.string().min(1).max(1_000_000), summary: z.string().max(2000).optional(),
   tags: z.array(z.string().min(1).max(80)).max(50).optional(), importance: z.number().min(0).max(1).optional(),
@@ -20,9 +24,8 @@ export class MemoryTransferService {
 
   /**
    * Exports a space as portable JSON or Markdown. Rows are read in bounded,
-   * keyset-paginated batches and rendered incrementally so that a very large
-   * space can never assemble one giant result set (or one giant string) in
-   * memory: the export is hard-capped at `maxRows` rows and reports `truncated`.
+   * keyset-paginated batches. The compatibility API returns one string, bounded
+   * by both row count and bytes; large HTTP downloads should use exportStream.
    */
   async export(userId: string, spaceId: string, format: 'json'|'markdown', options?: { maxRows?: number; batchSize?: number }): Promise<{ filename: string; mimeType: string; content: string; rowCount: number; truncated: boolean }> {
     const signal = operationSignal();
@@ -31,35 +34,44 @@ export class MemoryTransferService {
     if (!space.rows[0]) throw new Error('Memory space not found.');
     const safeName = space.rows[0].name.replace(/[^\p{L}\p{N}._-]+/gu, '-').replace(/^-+|-+$/g, '') || 'memory-space';
     const maxRows = options?.maxRows ?? 50_000;
-    const batchSize = options?.batchSize ?? 500;
+    const maxBytes = 16 * 1024 * 1024;
+    let bytes = 0;
+    const account = (text: string) => {
+      bytes += Buffer.byteLength(text, 'utf8');
+      if (bytes > maxBytes) throw new Error('Export exceeds 16 MiB; use a filtered or streaming export.');
+      return text;
+    };
+    const batchSize = options?.batchSize ?? 16;
+    if(!Number.isInteger(maxRows)||maxRows<1||maxRows>50000||!Number.isInteger(batchSize)||batchSize<1||batchSize>500)throw new Error('Invalid export limits.');
     const batches = exportBatches(this.database, spaceId, batchSize);
     if (format === 'json') {
       // Compact, streaming-friendly JSON built one row at a time.
-      const parts = [`{"schema":"sakura-memory-export/v1","exportedAt":${JSON.stringify(new Date().toISOString())},"space":${JSON.stringify(space.rows[0])},"memories":[`];
+      const parts = [account(`{"schema":"sakura-memory-export/v1","exportedAt":${JSON.stringify(new Date().toISOString())},"space":${JSON.stringify(space.rows[0])},"memories":[`)];
       let first = true; let rowCount = 0; let truncated = false;
       for await (const rows of batches) {
         signal?.throwIfAborted();
         for (const row of rows) {
           if (rowCount >= maxRows) { truncated = true; break; }
-          parts.push((first ? '' : ',') + JSON.stringify(row));
+          parts.push(account((first ? '' : ',') + JSON.stringify(row)));
           first = false;
           rowCount += 1;
         }
         if (truncated) break;
       }
-      parts.push(']');
-      if (truncated) parts.push(`,"truncated":true,"maxRows":${maxRows}`);
-      parts.push('}');
+      const suffix=']'+(truncated?`,"truncated":true,"maxRows":${maxRows}`:'')+'}';
+      parts.push(account(suffix));
       return { filename: `${safeName}.json`, mimeType: 'application/json', content: parts.join(''), rowCount, truncated };
     }
     const sections: string[] = [];
+    account(`# ${space.rows[0].name}\n\n${space.rows[0].description}\n\n`);
     let rowCount = 0; let truncated = false;
     for await (const rows of batches) {
       signal?.throwIfAborted();
       for (const memory of rows as Array<Record<string, unknown>>) {
         if (rowCount >= maxRows) { truncated = true; break; }
         const tags = (memory.tags as string[]).join(', ');
-        sections.push(`## ${memory.summary || memory.type}\n\n- ID: ${memory.id}\n- Type: ${memory.type}\n- Tags: ${tags}\n- Importance: ${memory.importance}\n- Confidence: ${memory.confidence}\n\n${memory.content}`);
+        const section=`## ${memory.summary || memory.type}\n\n- ID: ${memory.id}\n- Type: ${memory.type}\n- Tags: ${tags}\n- Importance: ${memory.importance}\n- Confidence: ${memory.confidence}\n\n${memory.content}`;
+        account(section+'\n\n---\n\n'); sections.push(section);
         rowCount += 1;
       }
       if (truncated) break;
@@ -82,10 +94,17 @@ export class MemoryTransferService {
     let completed = 0;
     for (let index = 0; index < records.length; index += 1) {
       if (signal?.aborted) break;
+      const cancellation=await this.database.query<{cancel_requested:boolean}>('SELECT cancel_requested FROM ingestion_jobs WHERE id=$1',[job.rows[0].id]);
+      if(cancellation.rows[0]?.cancel_requested) {
+        await this.database.query("UPDATE ingestion_jobs SET status='cancelled',updated_at=now() WHERE id=$1",[job.rows[0].id]);
+        return {jobId:job.rows[0].id,status:'cancelled',total:records.length,completed,failed:errors.length,errors,warnings};
+      }
       try {
+        const recordSize=Buffer.byteLength(JSON.stringify(records[index]));
+        if(recordSize>2_000_000) throw new Error('Import record exceeds 2 MB.');
         const record = importMemorySchema.parse(records[index]);
         const memory = await this.semantic.remember(userId, { spaceId, type: record.type as MemoryType, content: record.content,
-          summary: record.summary, tags: record.tags, importance: record.importance, confidence: record.confidence,
+          summary: record.summary, tags: record.tags, status:record.status,sources:record.sources, importance: record.importance, confidence: record.confidence,
           sensitivity: record.sensitivity, validFrom: record.validFrom, validUntil: record.validUntil, expiresAt: record.expiresAt,
           source: { type: `import_${format}`, agent: sourceAgent } });
         completed += 1;
@@ -98,10 +117,12 @@ export class MemoryTransferService {
       }
     }
     const status = signal?.aborted ? 'cancelled' : errors.length === records.length && records.length > 0 ? 'failed' : 'completed';
+    const cancellation=await this.database.query<{cancel_requested:boolean}>('SELECT cancel_requested FROM ingestion_jobs WHERE id=$1',[job.rows[0].id]);
+    const finalStatus=cancellation.rows[0]?.cancel_requested?'cancelled':status;
     const progress = { total: records.length, completed, failed: errors.length, errors: errors.slice(0, 100), warnings: warnings.slice(0, 100) };
     await this.database.query('UPDATE ingestion_jobs SET status=$2,progress=$3,error=$4,updated_at=now() WHERE id=$1',
-      [job.rows[0].id, status, progress, errors.length ? `${errors.length} record(s) failed.` : null]);
-    return { jobId: job.rows[0].id, status, ...progress };
+      [job.rows[0].id, finalStatus, progress, errors.length ? `${errors.length} record(s) failed.` : null]);
+    return { jobId: job.rows[0].id, status:finalStatus, ...progress };
   }
 
   async status(userId: string, jobId: string, agentId?: string) {
@@ -120,13 +141,13 @@ export class MemoryTransferService {
  * the whole space in one query. Ordering by (created_at, id) is stable because
  * memory ids are unique.
  */
-async function* exportBatches(database: Database, spaceId: string, batchSize: number): AsyncGenerator<Record<string, unknown>[]> {
+export async function* exportBatches(database: Database, spaceId: string, batchSize: number): AsyncGenerator<Record<string, unknown>[]> {
   let cursorCreatedAt: string | null = null;
   let cursorId: string | null = null;
   for (;;) {
     const result = await database.query(
       `SELECT m.id,m.type,m.content,m.summary,m.tags,m.importance,m.confidence,m.sensitivity,m.status,
-       m.valid_from,m.valid_until,m.expires_at,m.created_at,m.updated_at,
+       m.valid_from,m.valid_until,m.expires_at,m.created_at::text AS created_at,m.updated_at,
        coalesce(json_agg(json_build_object('type',ms.source_type,'uri',ms.source_uri,'agent',ms.source_agent,'excerpt',ms.excerpt,'metadata',ms.metadata))
          FILTER(WHERE ms.id IS NOT NULL),'[]') AS sources
        FROM memories m LEFT JOIN memory_sources ms ON ms.memory_id=m.id
@@ -143,10 +164,12 @@ async function* exportBatches(database: Database, spaceId: string, batchSize: nu
   }
 }
 
-function parseJson(content: string): unknown[] {
+export function parseJson(content: string): unknown[] {
   const parsed = JSON.parse(content) as unknown;
   if (Array.isArray(parsed)) return parsed;
   if (parsed && typeof parsed === 'object' && Array.isArray((parsed as { memories?: unknown[] }).memories)) {
+    const truncated=(parsed as {truncated?:boolean}).truncated===true;
+    if(truncated)throw new Error('Truncated JSON export cannot be imported as a complete data set.');
     return (parsed as { memories: unknown[] }).memories.map(item => normalizeExportRecord(item));
   }
   throw new Error('JSON import must be an array or a Sakura export object with memories.');
@@ -162,7 +185,7 @@ function normalizeExportRecord(value: unknown): unknown {
   };
 }
 
-function parseMarkdown(content: string): unknown[] {
+export function parseMarkdown(content: string): unknown[] {
   const parts = content.split(/^##\s+/m).slice(1);
   if (!parts.length && content.trim()) return [{ type: 'document', content: content.trim(), summary: 'Imported Markdown' }];
   return parts.map(part => {

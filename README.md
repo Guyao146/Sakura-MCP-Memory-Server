@@ -16,6 +16,8 @@
 
 ## 本次升级注意事项
 
+- `v0.5.0` 新增 `016`（工作区管理与可靠性）迁移，初始化用量计数并保存导入断点、邀请撤销及会话已验证邮箱；大库请安排维护窗口，先备份数据库和原主密钥。详细边界见 [管理增强指南](docs/management-upgrade.md)。
+
 - 应用启动会按 `AUTO_MIGRATE` 执行新增的 `011`（OIDC 浏览器绑定）、`012`（向量一致性）和 `014`（Sakura OIDC 提供方）迁移；升级前尚未完成的登录需重新发起。
 - `014` 迁移为 `oidc_login_attempts` 增加 `provider` 列（默认 `authentik`，已有且具备浏览器绑定的事务保留原提供方），并放宽 `web_sessions.auth_source` 约束以记录 `sakura` 来源。Sakura 为可选功能，未通过环境变量或后台保存完整配置时不显示其入口。
 - 内容、摘要或标签修改（含冲突合并）后旧向量立即失效，避免召回旧语义；可在后台重建向量。混合搜索在 PostgreSQL 内对全空间排序，只向应用返回限制条数。
@@ -362,7 +364,7 @@ docker compose up -d
 `docker-compose.yml` 是生产编排文件，默认直接拉取：
 
 ```text
-ghcr.io/guyao146/sakura-mcp-server:0.4.1
+ghcr.io/guyao146/sakura-mcp-server:0.5.0
 ```
 
 如果 GHCR Package 设置为 Public，服务器无需 `docker login`。首次发布后请在 GitHub 仓库的 **Packages → sakura-mcp-server → Package settings** 中确认可见性为 **Public**。
@@ -392,7 +394,7 @@ docker compose up -d
 生产 Compose 不需要本地 Dockerfile、Node.js、npm 或完整源码。镜像版本通过 `.env` 覆盖：
 
 ```dotenv
-SAKURA_MCP_IMAGE=ghcr.io/guyao146/sakura-mcp-server:0.4.1
+SAKURA_MCP_IMAGE=ghcr.io/guyao146/sakura-mcp-server:0.5.0
 ```
 
 如果需要固定到其他已发布版本，只需修改 `SAKURA_MCP_IMAGE`，然后执行 `docker compose pull && docker compose up -d`。
@@ -671,7 +673,7 @@ curl https://mcp.example.com/health
 
 生产环境使用 `nginx-mcp.conf.example` 提供 HTTPS，仅开放 443，不直接暴露 PostgreSQL 和 3001 端口。
 
-生产环境在应用只能由可信 Nginx 访问时设置 `TRUST_PROXY=true`，否则保持默认 `false`，防止客户端伪造 `X-Forwarded-For` 绕过限流。应用提供 CSP、HSTS、点击劫持、MIME sniffing、Referrer 和 Permissions Policy 安全头，并对 MCP、登录、安装和管理 API 使用独立限额。
+生产环境在应用只能由可信 Nginx 访问时设置 `TRUST_PROXY=true`，否则保持默认 `false`。边缘代理必须用 `$remote_addr` **覆盖** `X-Forwarded-For`，不得追加客户端提供的转发链；应用只接受单个合法 IP，缺失、无效或多地址头共用保守限流桶。多层代理应先用明确的可信 CIDR 配置 Nginx real_ip，再向应用发送已验证的单个地址。应用提供 CSP、HSTS、点击劫持、MIME sniffing、Referrer 和 Permissions Policy 安全头，并对 MCP、登录、安装和管理 API 使用独立限额。
 
 ```dotenv
 TRUST_PROXY=true
@@ -742,7 +744,7 @@ npm.cmd start
 
 ## 当前开发状态
 
-`v0.1.0` 是早期安全 MCP 网关版本；当前 `main` 的应用版本为 `v0.4.1`，对应 GHCR 镜像 `ghcr.io/guyao146/sakura-mcp-server:0.4.1`（另有 `latest`）和生产 Compose 部署版本。
+`v0.1.0` 是早期安全 MCP 网关版本；当前 `main` 的应用版本为 `v0.5.0`，对应 GHCR 镜像 `ghcr.io/guyao146/sakura-mcp-server:0.5.0`（另有 `latest`）和生产 Compose 部署版本。
 
 已完成：
 
@@ -774,9 +776,15 @@ npm.cmd start
 
 未完成的功能不会以伪造数据或静默降级方式对外宣称可用。
 
+## v0.5.0 工作区管理增强
+
+新增「工作区管理」：记忆分页筛选与批量操作、版本差异和回收站、持久化导入预检/取消/重试、成员与邀请、空间配额及运行状态。另提供离线数据库备份/校验/空库恢复工具，代理和 CSP 同步加固。
+
+升级包含迁移 `016`，请先备份数据库、主密钥和部署配置。镜像与 Release 是否可用以 GitHub Actions 发布结果为准；真实恢复及 Nginx 部署演练仍需在隔离环境完成。权限边界与验证步骤见 [管理增强指南](docs/management-upgrade.md)。
+
 ## 自动测试与发布
 
-推送分支会执行类型检查、单元测试和 Docker 构建。推送 `v*` tag 后自动运行测试、生成 npm tarball 并创建 GitHub Release，同时为 `linux/amd64` 与 `linux/arm64` 构建 GHCR 镜像，以版本号（如 `0.4.1`）和 `latest` 发布；发布镜像与本地 Dockerfile 构建内容一致，CI 会先行验证 Compose 与镜像构建。GHCR Package 默认继承仓库可见性，首次发布后可在 **Packages → Package settings** 中确认为 Public，使服务器无需 `docker login`。
+推送分支会执行类型检查、单元测试和 Docker 构建。推送 `v*` tag 后自动运行测试、生成 npm tarball 并创建 GitHub Release，同时为 `linux/amd64` 与 `linux/arm64` 构建 GHCR 镜像，以版本号（如 `0.5.0`）和 `latest` 发布；发布镜像与本地 Dockerfile 构建内容一致，CI 会先行验证 Compose 与镜像构建。GHCR Package 默认继承仓库可见性，首次发布后可在 **Packages → Package settings** 中确认为 Public，使服务器无需 `docker login`。
 
 ### 浏览器请求与身份声明边界
 

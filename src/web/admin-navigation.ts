@@ -11,6 +11,7 @@ const navigation = [
   ['security', '账号安全', 'M12 3 3 7v5c0 5 9 9 9 9s9-4 9-9V7z M8 12l3 3 5-6'],
   ['authentik', '身份认证', 'M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8z M4 21v-2a8 6 0 0 1 16 0v2'],
   ['providers', '模型 Provider', 'M7 7h10v10H7z M9 1v6 M15 1v6 M9 17v6 M15 17v6 M1 9h6 M1 15h6 M17 9h6 M17 15h6'],
+  ['management', '工作区管理', 'M4 4h16v16H4z M4 10h16 M10 10v10'],
   ['about', '关于', 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M12 16v-5 M12 8h.01']
 ] as const;
 export const navigationHtml = '<div class="nav-caption">WORKSPACE / 工作台</div>' + navigation.map(([view, label, path]) => {

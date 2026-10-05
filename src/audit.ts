@@ -1,4 +1,4 @@
-import { appendFile, mkdir } from 'node:fs/promises';
+import { appendFile, mkdir, stat, rename, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { Principal } from './auth.js';
 import type { Database } from './database.js';
@@ -63,9 +63,22 @@ export class AuditLogger {
     return { events: rows, nextCursor: rows.length === options.limit ? rows[rows.length - 1].id : null };
   }
 
-  private async append(entry: Record<string, unknown>): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    await appendFile(this.filePath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+  private writes: Promise<void> = Promise.resolve();
+  private append(entry: Record<string, unknown>): Promise<void> {
+    const write=this.writes.then(async()=>{
+      await mkdir(dirname(this.filePath), { recursive: true });
+      const size=await stat(this.filePath).then(s=>s.size).catch(()=>0);
+      if(size>=10*1024*1024) {
+        await rm(`${this.filePath}.5`,{force:true});
+        for(let index=4;index>=1;index--) {
+          await rename(`${this.filePath}.${index}`,`${this.filePath}.${index+1}`).catch(error=>{if(error.code!=='ENOENT')throw error;});
+        }
+        await rename(this.filePath,`${this.filePath}.1`);
+      }
+      await appendFile(this.filePath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+    });
+    this.writes=write.catch(()=>undefined);
+    return write;
   }
 }
 

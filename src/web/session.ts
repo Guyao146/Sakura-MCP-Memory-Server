@@ -60,7 +60,7 @@ export function providerConfig(config: AppConfig, provider: OidcProvider): OidcP
 
 export interface WebIdentity {
   sessionId: string; userId: string; subject: string; email: string | null; displayName: string;
-  avatarUrl: string | null; isSystemAdmin: boolean; expiresAt: string; authSource: WebAuthSource;
+  avatarUrl: string | null; verifiedEmail?: string; isSystemAdmin: boolean; expiresAt: string; authSource: WebAuthSource;
 }
 
 /**
@@ -216,7 +216,7 @@ export class WebSessionService {
       email, displayName, allowAdminByEmail: email !== undefined,
       adminByGroup: adminByGroup(payload, auth, attempt.provider === 'sakura' ? [] : DEFAULT_ADMIN_GROUPS)
     });
-    return this.issueSession(identity.userId, attempt.return_to, attempt.provider);
+    return this.issueSession(identity.userId, attempt.return_to, attempt.provider, undefined, email);
   }
 
   /**
@@ -225,7 +225,7 @@ export class WebSessionService {
    * funnel through here so session cookies, expiry and return-target handling
    * stay identical.
    */
-  async issueSession(userId: string, returnTo: string, authSource: WebAuthSource, credentialVersion?: string): Promise<{ token: string; returnTo: string; authSource: WebAuthSource }> {
+  async issueSession(userId: string, returnTo: string, authSource: WebAuthSource, credentialVersion?: string, verifiedEmail?: string): Promise<{ token: string; returnTo: string; authSource: WebAuthSource }> {
     const token = `sess_${base64url(randomBytes(32))}`;
     if (authSource === 'local') {
       if (!credentialVersion) throw new Error('Local credential version is required.');
@@ -237,8 +237,8 @@ export class WebSessionService {
       if (!result.rows.length) throw new Error('Local credentials changed; sign in again.');
     } else {
       await this.database.query(
-        `INSERT INTO web_sessions(user_id,token_hash,auth_source,expires_at) VALUES($1,$2,$3,now()+interval '12 hours')`,
-        [userId, hash(token), authSource]);
+        `INSERT INTO web_sessions(user_id,token_hash,auth_source,expires_at,verified_email) VALUES($1,$2,$3,now()+interval '12 hours',$4)`,
+        [userId, hash(token), authSource, verifiedEmail ?? null]);
     }
     return { token, returnTo: safeReturnPath(returnTo, this.getConfig().publicBaseUrl), authSource };
   }
@@ -298,9 +298,9 @@ export class WebSessionService {
     if (!token?.startsWith('sess_')) throw new Error('Web session is missing.');
     const result = await this.database.query<{
       session_id: string; user_id: string; oidc_subject: string; email: string | null; display_name: string;
-      avatar_url: string | null; is_system_admin: boolean; expires_at: string; auth_source: WebAuthSource;
+      avatar_url: string | null; verified_email?: string; is_system_admin: boolean; expires_at: string; auth_source: WebAuthSource;
     }>(
-      `SELECT ws.id AS session_id,u.id AS user_id,u.oidc_subject,u.email,u.display_name,u.avatar_url,u.is_system_admin,ws.expires_at,ws.auth_source
+      `SELECT ws.id AS session_id,u.id AS user_id,u.oidc_subject,u.email,u.display_name,u.avatar_url,u.is_system_admin,ws.expires_at,ws.auth_source,ws.verified_email
        FROM web_sessions ws JOIN users u ON u.id=ws.user_id
        WHERE ws.token_hash=$1 AND ws.revoked_at IS NULL AND ws.expires_at>now()
        AND (ws.auth_source<>'local' OR EXISTS (SELECT 1 FROM local_credentials lc
@@ -309,7 +309,7 @@ export class WebSessionService {
     if (!row) throw new Error('Web session is invalid, expired, or revoked.');
     await this.database.query('UPDATE web_sessions SET last_seen_at=now() WHERE id=$1', [row.session_id]);
     return { sessionId: row.session_id, userId: row.user_id, subject: row.oidc_subject, email: row.email,
-      displayName: row.display_name, avatarUrl: row.avatar_url, isSystemAdmin: row.is_system_admin,
+      displayName: row.display_name, avatarUrl: row.avatar_url, verifiedEmail: row.verified_email ?? undefined, isSystemAdmin: row.is_system_admin,
       expiresAt: row.expires_at, authSource: row.auth_source ?? 'authentik' };
   }
 

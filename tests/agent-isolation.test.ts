@@ -30,6 +30,16 @@ describe('Agent space isolation', () => {
     } finally { await server.close(); }
   });
 
+  it.each(['memory_browse','memory_history'])('denies %s for a live Agent without space grants',async name=>{
+    const handlers=new Map<string,Function>(),original=McpServer.prototype.registerTool;
+    vi.spyOn(McpServer.prototype,'registerTool').mockImplementation(function(this:McpServer,tool,options,handler){handlers.set(tool,handler);return original.call(this,tool,options,handler);});
+    vi.spyOn(MemoryRepository.prototype,'ensureUser').mockResolvedValue({userId:'owner',personalSpaceId:'personal'});
+    const query=vi.fn(async(sql:string)=>({rows:sql.includes('agent_space_grants')?[]:sql.includes('SELECT sm.role')?[{role:'owner'}]:[{id:'m',space_id:'private'}]}));
+    const config=loadConfig({PUBLIC_BASE_URL:'http://localhost',DATABASE_URL:'postgresql://unused',CONFIG_ENCRYPTION_KEY:Buffer.alloc(32).toString('base64url')});
+    const server=createServer({query} as never,{id:'owner',agentId:'agent',source:'api_key',scopes:['memory:read'],expiresAt:Infinity},{write:async()=>{}} as never,()=>config);
+    try{const result=await handlers.get(name)!({memory_id:'m',space_id:'private',page:1},{mcpReq:{signal:new AbortController().signal}});expect(result.isError).toBe(true);expect(result.content[0].text).toContain('not granted');}finally{await server.close();}
+  });
+
   it('filters unscoped audit queries by live Agent grants', async () => {
     const query = vi.fn(async () => ({ rows: [] }));
     await new AuditLogger('', { query } as never).list('owner', { agentId: 'agent', limit: 100 });

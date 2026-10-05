@@ -4,7 +4,7 @@ import { APP_VERSION, compareVersions, UpdateChecker } from '../src/version.js';
 
 describe('application version and update checks', () => {
   it('uses the released semantic version and compares versions', () => {
-    expect(APP_VERSION).toBe('0.4.1');
+    expect(APP_VERSION).toBe('0.5.0');
     expect(compareVersions('0.3.4', '0.3.3')).toBe(1);
     expect(compareVersions('0.3.4', '0.3.4')).toBe(0);
     expect(compareVersions('0.3.3', '0.3.4')).toBe(-1);

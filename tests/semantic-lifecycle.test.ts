@@ -8,6 +8,11 @@ import type { Database } from '../src/database.js';
 import { loadConfig } from '../src/config.js';
 import { operationContext } from '../src/operations.js';
 
+// Exercise cancellation independently of the quota database transaction.
+vi.mock('../src/providers/metrics.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/providers/metrics.js')>();
+  return {...actual,reserveProviderCall:vi.fn().mockResolvedValue(undefined),recordProviderCall:vi.fn().mockResolvedValue(undefined)};
+});
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('semantic cancellation', () => {

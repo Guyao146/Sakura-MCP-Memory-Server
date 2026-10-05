@@ -12,5 +12,7 @@ export interface MemoryRecord {
 export interface RememberInput {
   spaceId: string; type: MemoryType; content: string; summary?: string; tags?: string[];
   importance?: number; confidence?: number; sensitivity?: number; validFrom?: string; validUntil?: string; expiresAt?: string;
+  status?: Exclude<MemoryStatus,'deleted'>;
+  sources?: Array<{ type: string; uri?: string; agent?: string; excerpt?: string; metadata?: Record<string, unknown> }>;
   source?: { type: string; uri?: string; agent?: string; excerpt?: string; metadata?: Record<string, unknown> };
 }

@@ -1,3 +1,8 @@
+import { MemoryManagement,browseSchema } from '../src/memory/management.js';
+import { MemberManagement } from '../src/spaces/management.js';
+import { ImportQueue } from '../src/transfer/queue.js';
+import { processImportItem } from '../src/transfer/queue-item.js';
+import { providerScope,reserveProviderCall } from '../src/providers/metrics.js';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { Database } from '../src/database.js';
 import { MemoryRepository } from '../src/memory/repository.js';
@@ -37,7 +42,7 @@ describeDatabase('PostgreSQL installation integration', () => {
     const extension = await database.query<{ extversion: string }>("SELECT extversion FROM pg_extension WHERE extname='vector'");
     const migrations = await database.query<{ name: string }>('SELECT name FROM schema_migrations ORDER BY name');
     expect(extension.rows[0].extversion).toBeTruthy();
-    expect(migrations.rows.map(row => row.name)).toEqual(['001_memory_platform.sql', '002_installation.sql', '003_web_sessions.sql', '004_semantic_memory.sql', '005_memory_governance.sql', '006_background_jobs.sql', '007_audit_security.sql', '008_agent_secret_reveal.sql', '009_login_probe.sql', '010_client_sessions.sql', '011_oidc_browser_binding.sql', '012_embedding_consistency.sql', '013_local_login.sql', '014_sakura_oidc_provider.sql', '015_account_security.sql']);
+    expect(migrations.rows.map(row => row.name)).toEqual(['001_memory_platform.sql', '002_installation.sql', '003_web_sessions.sql', '004_semantic_memory.sql', '005_memory_governance.sql', '006_background_jobs.sql', '007_audit_security.sql', '008_agent_secret_reveal.sql', '009_login_probe.sql', '010_client_sessions.sql', '011_oidc_browser_binding.sql', '012_embedding_consistency.sql', '013_local_login.sql', '014_sakura_oidc_provider.sql', '015_account_security.sql', '016_management_reliability.sql']);
     await expect(settings.installation()).resolves.toMatchObject({ completed: false });
   });
 
@@ -691,6 +696,81 @@ describeDatabase('PostgreSQL installation integration', () => {
     finish(outcome === 'success' ? Response.json({ embeddings: [[1,0]] }) : new Response('failed', { status: 500 }));
     expect((await pending).status).toBe('superseded');
     expect((await database.query('SELECT 1 FROM memory_embeddings WHERE memory_id=$1', [memory.id])).rows).toHaveLength(0);
+  });
+
+  it('exports microsecond timestamps over multiple real PostgreSQL pages without repetition',async()=>{
+    const repo=new MemoryRepository(database),owner=await repo.ensureUser('export-micros-owner');
+    const space=await new SpaceRepository(database).create(owner.userId,'Micros','');
+    await database.query(`INSERT INTO memories(space_id,created_by,type,content,created_at) SELECT $1,$2,'fact','record '||n,'2026-01-01 00:00:00.123456+00'::timestamptz FROM generate_series(1,40) n`,[space.id,owner.userId]);
+    const exported=await new MemoryTransferService(database,{} as never,{} as never).export(owner.userId,space.id,'json');
+    expect(exported.rowCount).toBe(40);expect(new Set(JSON.parse(exported.content).memories.map((m:{id:string})=>m.id)).size).toBe(40);
+  });
+
+  it('enforces quotas under concurrent writes and versions a trash restore',async()=>{
+    const repo=new MemoryRepository(database),owner=await repo.ensureUser('quota-owner');
+    const space=await new SpaceRepository(database).create(owner.userId,'Quota','');
+    await database.query('UPDATE spaces SET max_memories=1,max_content_bytes=100 WHERE id=$1',[space.id]);
+    const attempts=await Promise.allSettled(['first','second'].map(content=>repo.remember(owner.userId,{spaceId:space.id,type:'fact',content})));
+    expect(attempts.filter(x=>x.status==='fulfilled')).toHaveLength(1);
+    const saved=attempts.find(x=>x.status==='fulfilled') as PromiseFulfilledResult<Awaited<ReturnType<typeof repo.remember>>>;
+    const management=new MemoryManagement(database);
+    await management.change(owner.userId,space.id,[saved.value.id],'delete');
+    await management.change(owner.userId,space.id,[saved.value.id],'restore',1);
+    expect((await repo.get(owner.userId,saved.value.id)).content).toBe(saved.value.content);
+    expect((await management.history(owner.userId,saved.value.id)).versions).toHaveLength(3);
+    expect((await database.query('SELECT memory_count FROM spaces WHERE id=$1',[space.id])).rows[0].memory_count).toBe('1');
+    const outsider=await repo.ensureUser('quota-outsider');
+    await expect(management.browse(outsider.userId,browseSchema.parse({space_id:space.id}))).rejects.toThrow('access denied');
+  });
+
+  it('never commits two removals that eliminate the last owner',async()=>{
+    const repo=new MemoryRepository(database),a=await repo.ensureUser('owners-a'),b=await repo.ensureUser('owners-b');
+    const space=await new SpaceRepository(database).create(a.userId,'Owners','');
+    await database.query("INSERT INTO space_members(space_id,user_id,role) VALUES($1,$2,'owner')",[space.id,b.userId]);
+    const service=new MemberManagement(database);
+    const results=await Promise.allSettled([service.change(a.userId,space.id,a.userId,'remove'),service.change(b.userId,space.id,b.userId,'remove')]);
+    expect(results.filter(x=>x.status==='fulfilled')).toHaveLength(1);
+    expect((await database.query("SELECT count(*)::int AS n FROM space_members WHERE space_id=$1 AND role='owner'",[space.id])).rows[0].n).toBe(1);
+  });
+
+  it('commits import data and checkpoint once and preserves status and sources',async()=>{
+    const repo=new MemoryRepository(database),owner=await repo.ensureUser('queued-import-owner');
+    const space=await new SpaceRepository(database).create(owner.userId,'Imports','');
+    const queue=new ImportQueue(database);
+    const created=await queue.enqueue(owner.userId,space.id,'json',JSON.stringify([{content:'archived imported fact',status:'archived',sources:[{type:'document',uri:'https://example.test/source'}]}]),'keep');
+    await database.query("UPDATE ingestion_jobs SET status='processing',locked_by='fixture',locked_at=now() WHERE id=$1",[created.jobId]);
+    const job=(await database.query('SELECT * FROM ingestion_jobs WHERE id=$1',[created.jobId])).rows[0];
+    const id=await processImportItem(database,job,'fixture',0,new AbortController().signal);
+    await processImportItem(database,job,'fixture',0,new AbortController().signal);
+    expect((await repo.get(owner.userId,id!)).status).toBe('archived');
+    expect((await database.query('SELECT source_uri FROM memory_sources WHERE memory_id=$1',[id])).rows[0].source_uri).toBe('https://example.test/source');
+    expect((await database.query('SELECT count(*)::int AS n FROM memories WHERE space_id=$1',[space.id])).rows[0].n).toBe(1);
+    await database.query("UPDATE ingestion_jobs SET cancel_requested=true WHERE id=$1",[created.jobId]);
+    await expect(processImportItem(database,job,'fixture',0,new AbortController().signal)).rejects.toThrow('lease lost');
+  });
+
+  it('accepts and revokes invitations without overwriting existing ownership',async()=>{
+    const repo=new MemoryRepository(database),owner=await repo.ensureUser('invite-owner'),other=await repo.ensureUser('invite-other');
+    const spaces=new SpaceRepository(database),members=new MemberManagement(database),space=await spaces.create(owner.userId,'Invites','');
+    const ownInvite=await spaces.invite(owner.userId,space.id,'owner@example.test','viewer',48);
+    expect((await spaces.accept(owner.userId,'owner@example.test',ownInvite.token)).role).toBe('owner');
+    const revoked=await spaces.invite(owner.userId,space.id,'other@example.test','editor',48);
+    await members.revoke(owner.userId,space.id,revoked.invitationId);
+    await expect(spaces.accept(other.userId,'other@example.test',revoked.token)).rejects.toThrow('invalid');
+    const invite=await spaces.invite(owner.userId,space.id,'other@example.test','editor',48);
+    await spaces.accept(other.userId,'other@example.test',invite.token);
+    await members.change(owner.userId,space.id,other.userId,'transfer');
+    expect((await spaces.members(other.userId,space.id)).find((m:{id:string})=>m.id===other.userId).role).toBe('owner');
+    await expect(members.change(owner.userId,space.id,other.userId,'remove')).rejects.toThrow();
+  });
+
+  it('reserves Provider budget atomically for competing calls',async()=>{
+    const repo=new MemoryRepository(database),owner=await repo.ensureUser('provider-quota-owner');
+    const space=await new SpaceRepository(database).create(owner.userId,'Provider budget','');
+    await database.query('UPDATE spaces SET max_provider_calls_daily=1 WHERE id=$1',[space.id]);
+    const results=await Promise.allSettled([1,2].map(()=>providerScope.run({database,spaceId:space.id},()=>reserveProviderCall())));
+    expect(results.filter(x=>x.status==='fulfilled')).toHaveLength(1);
+    expect((await database.query('SELECT calls FROM provider_usage WHERE space_id=$1',[space.id])).rows[0].calls).toBe(1);
   });
 
   it('blocks cross-tenant memory, job, Agent and export access', async () => {

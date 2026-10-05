@@ -20,4 +20,15 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" --generate-notes ./*.tgz
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
+          if (process.env.GITHUB_REF_NAME !== `v${version}`) throw Error('Tag/package version mismatch');
+          const section = readFileSync('CHANGELOG.md', 'utf8').split(/^## /m)
+            .find(text => text.startsWith(`[${version}]`));
+          if (!section) throw Error('Missing changelog section');
+          writeFileSync(join(process.env.RUNNER_TEMP, 'release-notes.md'), '## ' + section);
+          NODE
+          gh release create "${GITHUB_REF_NAME}" --notes-file "${RUNNER_TEMP}/release-notes.md" --generate-notes ./*.tgz

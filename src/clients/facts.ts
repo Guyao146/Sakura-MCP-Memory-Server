@@ -17,7 +17,7 @@ export interface McpRequestFacts {
 /** Tools that write memories; used to flag a session as uploading. */
 const WRITE_TOOLS = new Set([
   'memory_remember', 'memory_extract_and_remember', 'memory_update', 'memory_forget',
-  'memory_resolve_conflict', 'memory_import', 'space_create', 'agent_create'
+  'memory_resolve_conflict', 'memory_import', 'memory_import_queue', 'space_create', 'agent_create'
 ]);
 
 export function readMcpFacts(body: unknown): McpRequestFacts {

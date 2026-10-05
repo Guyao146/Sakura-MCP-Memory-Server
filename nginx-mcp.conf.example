@@ -18,7 +18,9 @@ server {
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    # Single trusted edge: discard client-supplied forwarding chains.
+    # Multi-proxy deployments must configure real_ip from explicit trusted CIDRs first.
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header Authorization $http_authorization;
 
     location = / {
@@ -35,6 +37,7 @@ server {
     }
     location = /setup { proxy_pass http://127.0.0.1:3001; }
     location = /assets/setup.js { proxy_pass http://127.0.0.1:3001; }
+    location = /assets/management.js { proxy_pass http://127.0.0.1:3001; }
     location ^~ /api/setup/ {
         proxy_pass http://127.0.0.1:3001;
         proxy_read_timeout 30s;
@@ -42,6 +45,14 @@ server {
     location ^~ /auth/ { proxy_pass http://127.0.0.1:3001; }
     location = /admin { proxy_pass http://127.0.0.1:3001; }
     location = /api/me { proxy_pass http://127.0.0.1:3001; }
+    location ^~ /api/me/ { proxy_pass http://127.0.0.1:3001; }
+    # Stream large downloads without buffering them into proxy temp files.
+    location = /api/admin/exports {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+        proxy_buffering off;
+    }
     location ^~ /api/admin/ { proxy_pass http://127.0.0.1:3001; }
     location = /health { proxy_pass http://127.0.0.1:3001; access_log off; }
     location = /.well-known/oauth-protected-resource { proxy_pass http://127.0.0.1:3001; }

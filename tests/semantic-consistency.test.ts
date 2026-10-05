@@ -6,6 +6,11 @@ import { MemoryTransferService } from '../src/transfer/service.js';
 import { MemoryRepository } from '../src/memory/repository.js';
 import { loadConfig } from '../src/config.js';
 
+// These tests isolate embedding revision fences; quota accounting is tested separately.
+vi.mock('../src/providers/metrics.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/providers/metrics.js')>();
+  return {...actual,reserveProviderCall:vi.fn().mockResolvedValue(undefined),recordProviderCall:vi.fn().mockResolvedValue(undefined)};
+});
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 const memory = { id: 'memory', space_id: 'space', content: 'old', summary: '', tags: [], embedding_revision: '0' };
 const config = loadConfig({ PUBLIC_BASE_URL: 'http://localhost', DATABASE_URL: 'postgresql://unused',

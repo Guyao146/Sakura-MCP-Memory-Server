@@ -1,3 +1,6 @@
+import { managementScript } from './web/management-script.js';
+import { registerManagementRoutes } from './web/management-routes.js';
+import { streamingExport } from './transfer/stream.js';
 import { serve } from '@hono/node-server';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
 import type { Context, Next } from 'hono';
@@ -21,13 +24,12 @@ import { MemoryTransferService } from './transfer/service.js';
 import { JobRepository } from './jobs/repository.js';
 import { BackgroundWorker } from './jobs/worker.js';
 import { createServer } from './tools.js';
-import { setupPage, setupScript } from './setup/page.js';
+import { setupScript } from './setup/page.js';
+import { safeAdminPage as adminPage, safeLoginPage as loginPage, safeLocalLoginPage as localLoginPage, safeSetupPage as setupPage } from './security/pages.js';
 import { authentikConfigSchema, authentikDiscoveryInputSchema, sakuraConfigSchema, sakuraDiscoveryInputSchema, SetupService, setupInputSchema } from './setup/service.js';
 import { SettingsRepository } from './settings/repository.js';
 import { WebSessionService, primaryOidcProvider, browserLoginConfigured, SILENT_PROBE_PROVIDERS } from './web/session.js';
 import type { WebIdentity, WebAuthSource } from './web/session.js';
-import { adminPage } from './web/admin-page.js';
-import { localLoginPage, loginPage } from './web/login-page.js';
 import { LocalLoginService } from './web/local-login.js';
 import { attachmentHeader } from './security/http.js';
 import { createHttpApp } from './security/app.js';
@@ -82,6 +84,7 @@ app.use('/api/admin/*', async (context, next) => {
   await next();
 });
 
+registerManagementRoutes(app,database,adminApi,()=>config.worker.enabled);
 app.onError((error, context) => {
   logger.error({ err: error, path: context.req.path }, 'Unhandled HTTP error');
   return context.json({ error: 'internal_error', error_description: 'Internal server error.' }, 500);
@@ -96,6 +99,7 @@ const setupGuard = async (context: Context, next: Next) => {
 app.all('/', async context => isRootMcpRequest(context.req.method, context.req.raw.headers)
   ? handleMcp(context)
   : context.redirect((await settings.installation()).completed ? '/admin' : '/setup'));
+app.get('/assets/management.js',context=>context.body(managementScript,200,{'Content-Type':'application/javascript; charset=UTF-8'}));
 app.get('/setup', context => context.html(setupPage));
 app.get('/assets/setup.js', context => context.body(setupScript, 200, {
   'Content-Type': 'application/javascript; charset=UTF-8', 'Cache-Control': 'no-store'
@@ -437,13 +441,13 @@ app.get('/api/admin/exports', async context => {
   try {
     identity = await adminIdentity(context);
     const query = z.object({ space_id: z.string().uuid(), format: z.enum(['json','markdown']).default('json') }).parse(context.req.query());
-    const exported = await transfer.export(identity.userId, query.space_id, query.format);
+    const exported = await streamingExport(database,identity.userId, query.space_id, query.format);
     await audit.record({ actorUserId: identity.userId, spaceId: query.space_id, authSource: webAuthSource(identity),
       action: 'web.GET./api/admin/exports', targetType: 'space_export', targetId: query.space_id, result: 'success', metadata: { format: query.format } });
     context.header('Content-Type', `${exported.mimeType}; charset=utf-8`);
     context.header('Content-Disposition', attachmentHeader(exported.filename));
-    if (exported.truncated) context.header('X-Export-Truncated', String(exported.rowCount));
-    return context.body(exported.content);
+    context.header('X-Export-Limits','50000 rows; 256 MiB; inspect truncated in download');
+    return context.body(exported.stream);
   } catch (error) {
     await audit.record({ actorUserId: identity?.userId, authSource: identity ? webAuthSource(identity) : undefined,
       action: 'web.GET./api/admin/exports', result: 'error', metadata: { message: error instanceof Error ? error.message : 'Export failed.' } });

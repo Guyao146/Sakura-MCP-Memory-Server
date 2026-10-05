@@ -14,6 +14,14 @@ describe('memory database schema', () => {
     expect(ignore).not.toContain('!tools');
   });
 
+  it('disables buffering for the exact export route in the Nginx example', async () => {
+    const nginx = await readFile(new URL('../nginx-mcp.conf.example', import.meta.url), 'utf8');
+    const route = nginx.match(/location = \/api\/admin\/exports\s*\{([^}]+)\}/)?.[1];
+    expect(route).toContain('proxy_buffering off;');
+    expect(route).toContain('proxy_read_timeout 120s;');
+    expect(route).toContain('proxy_pass http://127.0.0.1:3001;');
+  });
+
   it('defines every multi-tenant memory platform table', async () => {
     const sql = await readFile(new URL('../migrations/001_memory_platform.sql', import.meta.url), 'utf8');
     for (const table of [
@@ -145,6 +153,9 @@ describe('memory database schema', () => {
     expect(nginx).toContain('location = / {');
     expect(nginx).toContain('location = /assets/setup.js');
     expect(nginx).toContain('location ^~ /api/setup/');
+    expect(nginx).toContain('location ^~ /api/me/');
+    expect(nginx).toContain('proxy_set_header X-Forwarded-For $remote_addr;');
+    expect(nginx).not.toContain('$proxy_add_x_forwarded_for');
     expect(nginx).toContain('proxy_pass http://127.0.0.1:3001;');
     expect(nginx).toMatch(/location = \/ \{[\s\S]*?proxy_read_timeout 120s;[\s\S]*?proxy_buffering off;/);
     expect(nginx).toContain('location = /.well-known/oauth-protected-resource {');
