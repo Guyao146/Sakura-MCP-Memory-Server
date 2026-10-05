@@ -14,6 +14,7 @@ describe('shared UI presentation', () => {
       expect(page).toContain('Sakura-MCP-Memory-Server');
       expect(page).not.toMatch(/Sakura-MCP-Server|Sakura MCP Server|>-MCP-Server/);
     }
+    expect(adminPage).toContain('.brand{letter-spacing:-.035em;white-space:normal;min-width:0;overflow-wrap:anywhere}');
     for (const page of [loginPage, localLoginPage]) expect(page).toContain('.brand-name,.compact-name{min-width:0;overflow-wrap:anywhere}');
   });
   it.each(pages.map((html, index) => ({ html, index })))('includes motion opt-out and keyboard focus styles in page $index', ({ html }) => {

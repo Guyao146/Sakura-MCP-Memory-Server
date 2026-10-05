@@ -4,7 +4,7 @@ export const adminPolishStyles = `
 ${interactionStyles}
 :root{--bg:#0e1019;--panel:#181b29;--panel2:#111420;--line:#303248;--text:#f0edf6;--muted:#a7a4bb;--accent:#efa5bf}
 body{background:radial-gradient(ellipse at 95% 0,#976cd914,transparent 45%),radial-gradient(ellipse at 20% 0,#e58aa30b,transparent 35%),var(--bg)}
-body>header{height:72px;padding:0 28px;background:#121521f5;z-index:3;gap:16px}.brand{letter-spacing:-.035em;white-space:nowrap}.brand b{color:#f2afc8}.version{display:inline-block;padding:3px 8px;background:#272334;border:1px solid #473448;border-radius:6px;vertical-align:middle}
+body>header{height:72px;padding:0 28px;background:#121521f5;z-index:3;gap:16px}.brand{letter-spacing:-.035em;white-space:normal;min-width:0;overflow-wrap:anywhere}.brand b{color:#f2afc8}.version{display:inline-block;padding:3px 8px;background:#272334;border:1px solid #473448;border-radius:6px;vertical-align:middle}
 main{grid-template-columns:224px minmax(0,1fr);min-height:calc(100vh - 72px)}
 nav{padding:26px 14px;background:#11141ebf;position:sticky;top:72px;height:calc(100vh - 72px);overflow-y:auto;align-self:start}
 .nav-caption{padding:0 14px;margin-bottom:18px;font-size:11px;letter-spacing:.14em;color:var(--muted)}

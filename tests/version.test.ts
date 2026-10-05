@@ -56,6 +56,11 @@ describe('application version and update checks', () => {
     expect(migration).toContain('docker compose stop');
   });
 
+  it('keeps the Windows installer UTF-8 BOM for Windows PowerShell 5', async () => {
+    const installer = await readFile(new URL('../scripts/install.ps1', import.meta.url));
+    expect([...installer.subarray(0,3)]).toEqual([0xef,0xbb,0xbf]);
+  });
+
   it('includes the adopted license and notice in both npm and container distributions', async () => {
     const [packageText, dockerfile, ignore] = await Promise.all([
       '../package.json', '../Dockerfile', '../.dockerignore'
