@@ -10,7 +10,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/guyao146/sakura-mcp-server
+  IMAGE_NAME: ghcr.io/guyao146/sakura-mcp-memory-server
 
 jobs:
   publish:

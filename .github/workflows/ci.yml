@@ -38,17 +38,20 @@ jobs:
         run: npm ci && npm run check
       - name: Build and browser regression
         run: npm run build && BROWSER_PATH=$(command -v google-chrome) node scripts/browser-check.mjs
-      - run: docker build --tag sakura-mcp-server:ci .
+      - run: docker build --tag sakura-mcp-memory-server:ci .
       - name: Verify runtime has no package managers
-        run: docker run --rm --entrypoint node sakura-mcp-server:ci -e "const fs=require('node:fs'); for (const path of ['/usr/local/lib/node_modules/npm','/usr/local/lib/node_modules/corepack']) { if(fs.existsSync(path)) throw Error(path); }"
+        run: docker run --rm --entrypoint node sakura-mcp-memory-server:ci -e "const fs=require('node:fs'); for (const path of ['/usr/local/lib/node_modules/npm','/usr/local/lib/node_modules/corepack']) { if(fs.existsSync(path)) throw Error(path); }"
       - name: Validate Docker Compose
         env:
           POSTGRES_PASSWORD: ci-compose-password
-        run: cp .env.example .env && docker compose config --quiet
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.legacy-data.yml config --format json | node -e "let input='';process.stdin.on('data',b=>input+=b);process.stdin.on('end',()=>{const c=JSON.parse(input);for(const key of ['postgres-data','runtime-secrets']){if(c.volumes[key].external!==true)throw Error('Unsafe legacy volume '+key);}if(!c.services['sakura-mcp-memory'])throw Error('Missing renamed service');});"
       - name: Scan container image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: sakura-mcp-server:ci
+          image-ref: sakura-mcp-memory-server:ci
           format: table
           # Report base-image CVEs without blocking application/Compose checks.
           exit-code: '0'

@@ -73,7 +73,7 @@ function linuxDesktop(executable: string): string {
     '[Desktop Entry]',
     'Type=Application',
     'Name=Sakura Cline Sync',
-    'Comment=Sync Cline task history into Sakura-MCP-Server',
+    'Comment=Sync Cline task history into Sakura-MCP-Memory-Server',
     'Exec=' + executable,
     'Terminal=false',
     'X-GNOME-Autostart-enabled=true'

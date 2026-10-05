@@ -9,7 +9,7 @@ export class Database {
   constructor(connectionString: string, maxConnections: number) {
     this.pool = new Pool({ connectionString, max: maxConnections, statement_timeout: 15_000,
       connectionTimeoutMillis: 5000, idleTimeoutMillis: 30_000, idle_in_transaction_session_timeout: 15_000,
-      application_name: 'Sakura-MCP-Server' });
+      application_name: 'Sakura-MCP-Memory-Server' });
   }
   query<T extends pg.QueryResultRow = pg.QueryResultRow>(text: string, values: unknown[] = []): Promise<pg.QueryResult<T>> {
     return this.pool.query<T>(text, values);

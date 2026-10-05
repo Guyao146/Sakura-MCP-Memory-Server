@@ -9,6 +9,13 @@ import { reducedMotionStyles } from '../src/web/design.js';
 const pages = [adminPage, loginPage, localLoginPage, setupPage];
 
 describe('shared UI presentation', () => {
+  it('uses the renamed product on every public page and supports long mobile branding', () => {
+    for (const page of pages) {
+      expect(page).toContain('Sakura-MCP-Memory-Server');
+      expect(page).not.toMatch(/Sakura-MCP-Server|Sakura MCP Server|>-MCP-Server/);
+    }
+    for (const page of [loginPage, localLoginPage]) expect(page).toContain('.brand-name,.compact-name{min-width:0;overflow-wrap:anywhere}');
+  });
   it.each(pages.map((html, index) => ({ html, index })))('includes motion opt-out and keyboard focus styles in page $index', ({ html }) => {
     expect(html).toContain(reducedMotionStyles);
     expect(html).toContain(':focus-visible');
@@ -41,18 +48,18 @@ describe('shared UI presentation', () => {
     const button = navigationHtml.match(/<button[^>]*data-view="about"[^>]*>/)?.[0];
     expect(button).toBe('<button type="button" data-view="about">');
     const about = adminPage.match(/<section id="about">([\s\S]*?)<\/section>/)![1];
-    expect(about).toContain('<h1>Sakura-MCP-Server</h1>');
+    expect(about).toContain('<h1>Sakura-MCP-Memory-Server</h1>');
     expect(about).toContain('id="aboutVersion"');
     expect(about).toContain('Sakura-License v1.2');
     expect(about).not.toMatch(/page-description|hero-mark|治理边界|pgvector|完整对话原文/);
     const links = [...about.matchAll(/<a href="([^"]+)"([^>]*)>/g)];
     expect(links.map(link => link[1])).toEqual([
-      'https://github.com/Guyao146/Sakura-MCP-Server',
-      'https://github.com/Guyao146/Sakura-MCP-Server/releases',
+      'https://github.com/Guyao146/Sakura-MCP-Memory-Server',
+      'https://github.com/Guyao146/Sakura-MCP-Memory-Server/releases',
       'https://wiki.mcylyr.cn/',
-      'https://github.com/Guyao146/Sakura-MCP-Server/blob/main/LICENSE',
-      'https://github.com/Guyao146/Sakura-MCP-Server/blob/main/NOTICE.md',
-      'https://github.com/Guyao146/Sakura-MCP-Server/issues'
+      'https://github.com/Guyao146/Sakura-MCP-Memory-Server/blob/main/LICENSE',
+      'https://github.com/Guyao146/Sakura-MCP-Memory-Server/blob/main/NOTICE.md',
+      'https://github.com/Guyao146/Sakura-MCP-Memory-Server/issues'
     ]);
     for (const link of links) expect(link[2]).toContain('target="_blank" rel="noopener noreferrer"');
   });

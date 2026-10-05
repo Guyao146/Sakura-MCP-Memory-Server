@@ -8,7 +8,7 @@ import { join } from 'node:path';
  * written with owner-only permissions.
  */
 export interface SyncConfig {
-  /** Sakura-MCP-Server `/mcp` endpoint, e.g. https://mcp.example.com/mcp */
+  /** Sakura-MCP-Memory-Server `/mcp` endpoint, e.g. https://mcp.example.com/mcp */
   mcpUrl: string;
   /** Agent API key: sk_sakura_... Used as a Bearer credential. */
   token: string;

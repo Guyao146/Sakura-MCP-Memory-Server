@@ -1,16 +1,17 @@
-# NOTICE — Sakura-MCP-Server 许可证采用声明
+# NOTICE — Sakura-MCP-Memory-Server 许可证采用声明
 
 本文件按《[Sakura-License 采用与授权指引](https://wiki.mcylyr.cn/#/../docs/sakura-license-adoption)》记录本项目的许可证采用信息，与 `LICENSE` 配套使用，本身不是许可正文。
 
 ## 项目身份
 
-- 项目名称：Sakura-MCP-Server
-- 官方仓库：https://github.com/Guyao146/Sakura-MCP-Server
+- 项目名称：Sakura-MCP-Memory-Server
+- 更名说明：`v0.5.1` 起采用现名；此前名称见历史版本。更名不改变权属、许可正文及既有授权。
+- 官方仓库：https://github.com/Guyao146/Sakura-MCP-Memory-Server
 - 原始来源：本仓库自创建，无外部上游源码
 
 ## 权利主体
 
-版权归属以 Git 提交记录为准；人工提交均由 Guyao146（guxuan.mojang@outlook.com）作出，另有仓库自动化工作流以 GitHub Action 身份作出的提交（发布与锁文件更新等）。商业许可与法律通知入口：[GitHub Issues](https://github.com/Guyao146/Sakura-MCP-Server/issues)。
+版权归属以 Git 提交记录为准；人工提交均由 Guyao146（guxuan.mojang@outlook.com）作出，另有仓库自动化工作流以 GitHub Action 身份作出的提交（发布与锁文件更新等）。商业许可与法律通知入口：[GitHub Issues](https://github.com/Guyao146/Sakura-MCP-Memory-Server/issues)。
 
 ## 适用范围
 

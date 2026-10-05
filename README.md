@@ -1,6 +1,6 @@
-# Sakura-MCP-Server
+# Sakura-MCP-Memory-Server
 
-**Sakura-MCP-Server** 是面向所有兼容 MCP 的 AI Agent 的多用户长期记忆平台。Claude、Cline、Cursor、Windsurf 及其他 Agent 可以在经过授权后，把事实、偏好、人物、事件、任务、项目、文档摘要和对话结论写入同一个可治理的记忆库，并在未来的会话中召回。
+**Sakura-MCP-Memory-Server** 是面向所有兼容 MCP 的 AI Agent 的多用户长期记忆平台。Claude、Cline、Cursor、Windsurf 及其他 Agent 可以在经过授权后，把事实、偏好、人物、事件、任务、项目、文档摘要和对话结论写入同一个可治理的记忆库，并在未来的会话中召回。
 
 它不是某几个项目的专用网关。外部系统只会作为可选 Connector 接入通用记忆模型。
 
@@ -25,6 +25,10 @@
 - 容器健康检查使用回环 TCP 连接及配置的公网 Host，不放宽外部 Host 校验；`npm pack` 会自动先构建，发布包包含编译产物和迁移。
 
 
+### 从旧项目名称升级
+
+`v0.5.1` 起项目更名为 **Sakura-MCP-Memory-Server**。**已有部署不要直接套用新 Compose 启动**：项目名变化会选择不同数据卷，必须先按 [改名迁移指南](docs/rename-migration.md) 复用原数据库、密钥卷和 `data` 目录。旧 GitHub URL 保留跳转；旧标签/镜像供回退，不覆盖历史版本。
+
 ## v0.2.0 架构
 
 ```text
@@ -32,7 +36,7 @@
       │                              │
       └──── HTTPS / Authentik ──────┘
                      │
-            Sakura-MCP-Server
+            Sakura-MCP-Memory-Server
              ├─ MCP Streamable HTTP
              ├─ 用户 / 空间 / 成员 / Agent 权限
              ├─ 记忆版本、来源、关系、冲突与审计
@@ -266,8 +270,8 @@ total / completed / failed / errors
 修改不需要新数据库迁移或重置配置。尚未发布镜像时，可从源码在项目目录使用开发 Compose 覆盖构建并仅替换应用（保留数据库和数据卷）：
 
 ```sh
-docker compose -f docker-compose.yml -f docker-compose.dev.yml build sakura-mcp
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --no-deps sakura-mcp
+docker compose -f docker-compose.yml -f docker-compose.dev.yml build sakura-mcp-memory
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --no-deps sakura-mcp-memory
 ```
 
 不要使用 `down -v`；仅拉取已发布镜像不会包含本地修复，必须用上面的开发覆盖重新构建。
@@ -311,8 +315,8 @@ Web 管理后台新增“审计日志”页面，支持空间、动作、结果�
 ### 一键初始化（Linux）
 
 ```bash
-git clone https://github.com/Guyao146/Sakura-MCP-Server.git
-cd Sakura-MCP-Server
+git clone https://github.com/Guyao146/Sakura-MCP-Memory-Server.git
+cd Sakura-MCP-Memory-Server
 chmod +x scripts/install.sh
 ./scripts/install.sh https://mcp.example.com
 ```
@@ -352,7 +356,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 如果不使用初始化脚本，仍可手工配置：
 
 ```bash
-cd Sakura-MCP-Server
+cd Sakura-MCP-Memory-Server
 # Compose 不会自动读取 .env.example，必须先创建 .env
 cp .env.example .env
 # 修改数据库密码、PUBLIC_BASE_URL，并生成 CONFIG_ENCRYPTION_KEY
@@ -364,10 +368,10 @@ docker compose up -d
 `docker-compose.yml` 是生产编排文件，默认直接拉取：
 
 ```text
-ghcr.io/guyao146/sakura-mcp-server:0.5.0
+ghcr.io/guyao146/sakura-mcp-memory-server:0.5.1
 ```
 
-如果 GHCR Package 设置为 Public，服务器无需 `docker login`。首次发布后请在 GitHub 仓库的 **Packages → sakura-mcp-server → Package settings** 中确认可见性为 **Public**。
+如果 GHCR Package 设置为 Public，服务器无需 `docker login`。首次发布后请在 GitHub 仓库的 **Packages → sakura-mcp-memory-server → Package settings** 中确认可见性为 **Public**。
 
 本地开发需要构建源码时使用：
 
@@ -380,10 +384,10 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 如果服务器不想克隆完整仓库，可以只下载生产 Compose 和环境模板，直接拉取 GHCR 镜像：
 
 ```bash
-mkdir -p /opt/sakura-mcp-server
-cd /opt/sakura-mcp-server
-curl -fsSLO https://raw.githubusercontent.com/Guyao146/Sakura-MCP-Server/main/docker-compose.yml
-curl -fsSLO https://raw.githubusercontent.com/Guyao146/Sakura-MCP-Server/main/.env.example
+mkdir -p /opt/sakura-mcp-memory-server
+cd /opt/sakura-mcp-memory-server
+curl -fsSLO https://raw.githubusercontent.com/Guyao146/Sakura-MCP-Memory-Server/main/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/Guyao146/Sakura-MCP-Memory-Server/main/.env.example
 cp .env.example .env
 # 填写密钥和 PUBLIC_BASE_URL
 mkdir -p data && chmod 700 data && chmod 600 .env
@@ -394,17 +398,17 @@ docker compose up -d
 生产 Compose 不需要本地 Dockerfile、Node.js、npm 或完整源码。镜像版本通过 `.env` 覆盖：
 
 ```dotenv
-SAKURA_MCP_IMAGE=ghcr.io/guyao146/sakura-mcp-server:0.5.0
+SAKURA_MCP_MEMORY_IMAGE=ghcr.io/guyao146/sakura-mcp-memory-server:0.5.1
 ```
 
-如果需要固定到其他已发布版本，只需修改 `SAKURA_MCP_IMAGE`，然后执行 `docker compose pull && docker compose up -d`。
+如果需要固定到其他已发布版本，只需修改 `SAKURA_MCP_MEMORY_IMAGE`，然后执行 `docker compose pull && docker compose up -d`。
 
 Compose 默认：
 
 - 应用默认绑定 `127.0.0.1:3001`，转发到容器内部 `3000`；
 - PostgreSQL 只在 Compose 内部网络；
 - `host.docker.internal` 映射到 Docker 宿主机，便于访问宿主机 Ollama；
-- PostgreSQL 数据保存在命名卷 `sakura-mcp-server_postgres-data`；
+- PostgreSQL 数据保存在命名卷 `sakura-mcp-memory-server_postgres-data`；
 - 审计 JSONL 保存在当前目录 `data/`；
 - 应用使用只读文件系统、非 root 用户、丢弃全部 Linux capabilities 和 PID 限制；
 生产 Compose 只拉取 GHCR 镜像，源码构建仅由 `docker-compose.dev.yml` 覆盖启用。
@@ -463,7 +467,7 @@ https://mcp.example.com/setup
 
 ### 可选的无认证模式
 
-认证默认启用。仅当 Sakura-MCP-Server 位于已通过防火墙、VPN 或反向代理白名单限制访问的私有网络时，可以在 `.env` 或宝塔 Compose 环境变量中设置：
+认证默认启用。仅当 Sakura-MCP-Memory-Server 位于已通过防火墙、VPN 或反向代理白名单限制访问的私有网络时，可以在 `.env` 或宝塔 Compose 环境变量中设置：
 
 ```dotenv
 AUTH=false
@@ -542,9 +546,9 @@ LOCAL_ADMIN_PASSWORD=replace-with-strong-password
 ```dotenv
 # 可选示例；全部保持注释即不启用 Sakura 登录
 # SAKURA_ISSUER=https://sakura.example.com
-# SAKURA_AUDIENCE=sakura-mcp
+# SAKURA_AUDIENCE=sakura-mcp-memory
 # SAKURA_JWKS_URI=https://sakura.example.com/jwks.json
-# SAKURA_CLIENT_ID=sakura-mcp
+# SAKURA_CLIENT_ID=sakura-mcp-memory
 # SAKURA_AUTHORIZATION_URL=https://sakura.example.com/authorize
 # SAKURA_TOKEN_URL=https://sakura.example.com/token
 # SAKURA_SCOPE_CLAIM=groups
@@ -572,13 +576,13 @@ LOCAL_ADMIN_PASSWORD=replace-with-strong-password
 
 ```text
 Authentik 地址：https://login.example.com
-应用名称（Application Slug）：sakura-mcp
+应用名称（Application Slug）：sakura-mcp-memory
 ```
 
 向导在停止输入约 600ms 后自动由服务端请求：
 
 ```text
-https://login.example.com/application/o/sakura-mcp/.well-known/openid-configuration
+https://login.example.com/application/o/sakura-mcp-memory/.well-known/openid-configuration
 ```
 
 并回填签发者地址、签名密钥地址、授权地址、令牌地址、用户信息地址和登出地址；也可以点击“获取 OpenID 配置”手动重试。基础地址必须是无路径、无凭据的 HTTPS 根地址，应用 Slug 只允许字母、数字、下划线和连字符。OIDC 自动发现不包含部署专属的令牌受众和客户端 ID，这两项仍需按 Authentik 提供方配置手动填写。
@@ -730,7 +734,7 @@ Authorization: Bearer <每个 Agent 独立的密钥>
 要求 Node.js 22+ 和可用的 PostgreSQL + pgvector。
 
 ```powershell
-cd D:\Sakura-MCP-Server
+cd D:\Sakura-MCP-Memory-Server
 Copy-Item .env.example .env
 npm.cmd install
 npm.cmd run check
@@ -744,7 +748,7 @@ npm.cmd start
 
 ## 当前开发状态
 
-`v0.1.0` 是早期安全 MCP 网关版本；当前 `main` 的应用版本为 `v0.5.0`，对应 GHCR 镜像 `ghcr.io/guyao146/sakura-mcp-server:0.5.0`（另有 `latest`）和生产 Compose 部署版本。
+`v0.1.0` 是早期安全 MCP 网关版本；当前 `main` 的应用版本为 `v0.5.1`，对应 GHCR 镜像 `ghcr.io/guyao146/sakura-mcp-memory-server:0.5.1`（另有 `latest`）和生产 Compose 部署版本。
 
 已完成：
 
@@ -784,7 +788,7 @@ npm.cmd start
 
 ## 自动测试与发布
 
-推送分支会执行类型检查、单元测试和 Docker 构建。推送 `v*` tag 后自动运行测试、生成 npm tarball 并创建 GitHub Release，同时为 `linux/amd64` 与 `linux/arm64` 构建 GHCR 镜像，以版本号（如 `0.5.0`）和 `latest` 发布；发布镜像与本地 Dockerfile 构建内容一致，CI 会先行验证 Compose 与镜像构建。GHCR Package 默认继承仓库可见性，首次发布后可在 **Packages → Package settings** 中确认为 Public，使服务器无需 `docker login`。
+推送分支会执行类型检查、单元测试和 Docker 构建。推送 `v*` tag 后自动运行测试、生成 npm tarball 并创建 GitHub Release，同时为 `linux/amd64` 与 `linux/arm64` 构建 GHCR 镜像，以版本号（如 `0.5.1`）和 `latest` 发布；发布镜像与本地 Dockerfile 构建内容一致，CI 会先行验证 Compose 与镜像构建。GHCR Package 默认继承仓库可见性，首次发布后可在 **Packages → Package settings** 中确认为 Public，使服务器无需 `docker login`。
 
 ### 浏览器请求与身份声明边界
 
@@ -808,7 +812,7 @@ node node_modules/vitest/vitest.mjs run tests/account-security.test.ts tests/acc
 如已检出 Sakura-Auth-Server，可启用真实 IdP 协议联调（PowerShell，路径按本机调整）：
 
 ```powershell
-Set-Location 'D:\VSProject\Sakura-MCP-Server'
+Set-Location 'D:\VSProject\Sakura-MCP-Memory-Server'
 $env:SAKURA_AUTH_SOURCE = 'D:\VSProject\Sakura-Auth-Server'
 try {
     node node_modules/vitest/vitest.mjs run tests/auth-routes.test.ts

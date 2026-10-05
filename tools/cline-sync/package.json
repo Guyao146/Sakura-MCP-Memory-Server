@@ -2,7 +2,7 @@
   "name": "cline-sync",
   "version": "0.2.0",
   "private": true,
-  "description": "Watches Cline task history and pushes conversation summaries into Sakura-MCP-Server memory.",
+  "description": "Watches Cline task history and pushes conversation summaries into Sakura-MCP-Memory-Server memory.",
   "type": "module",
   "main": "dist/main.js",
   "bin": { "cline-sync": "dist/main.js" },

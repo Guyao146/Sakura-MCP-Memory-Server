@@ -1,4 +1,4 @@
-﻿name: sakura-mcp-server
+﻿name: sakura-mcp-memory-server
 
 services:
   bootstrap-secrets:
@@ -41,7 +41,7 @@ services:
 
   postgres:
     image: pgvector/pgvector:pg16
-    container_name: sakura-mcp-server-postgres
+    container_name: sakura-mcp-memory-server-postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: sakura_memory
@@ -74,9 +74,9 @@ services:
         find /data -type d -exec chown 10001:10001 {} + -exec chmod 700 {} +
         find /data -type f -exec chown 10001:10001 {} + -exec chmod 600 {} +
 
-  sakura-mcp:
-    image: ${SAKURA_MCP_IMAGE:-ghcr.io/guyao146/sakura-mcp-server:0.5.0}
-    container_name: sakura-mcp-server-app
+  sakura-mcp-memory:
+    image: ${SAKURA_MCP_MEMORY_IMAGE:-${SAKURA_MCP_IMAGE:-ghcr.io/guyao146/sakura-mcp-memory-server:0.5.1}}
+    container_name: sakura-mcp-memory-server-app
     pull_policy: always
     restart: unless-stopped
     environment:
@@ -87,7 +87,7 @@ services:
       AUTH: ${AUTH:-}
       auth: ${auth:-}
       DATABASE_MAX_CONNECTIONS: ${DATABASE_MAX_CONNECTIONS:-20}
-      POSTGRES_HOST: sakura-mcp-server-postgres
+      POSTGRES_HOST: sakura-mcp-memory-server-postgres
       AUTO_MIGRATE: ${AUTO_MIGRATE:-true}
       AUTHENTIK_ISSUER: ${AUTHENTIK_ISSUER:-}
       AUTHENTIK_AUDIENCE: ${AUTHENTIK_AUDIENCE:-}
@@ -137,7 +137,7 @@ services:
     networks:
       default:
         aliases:
-          - sakura-mcp
+          - sakura-mcp-memory
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -159,8 +159,10 @@ services:
 
 volumes:
   postgres-data:
+    name: ${SAKURA_MEMORY_POSTGRES_VOLUME:-sakura-mcp-memory-server_postgres-data}
   runtime-secrets:
+    name: ${SAKURA_MEMORY_SECRETS_VOLUME:-sakura-mcp-memory-server_runtime-secrets}
 
 networks:
   default:
-    name: sakura-mcp-server-network
+    name: sakura-mcp-memory-server-network

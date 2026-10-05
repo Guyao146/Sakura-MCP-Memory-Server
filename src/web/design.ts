@@ -35,6 +35,8 @@ body{min-height:100svh;background:radial-gradient(ellipse at 95% 5%,#e58aa317,tr
 .brand-chip{border:1px solid #ffffff33;box-shadow:0 12px 35px #30144024;transform:rotate(-6deg)}
 .brand-chip svg{transform:rotate(6deg)}
 .brand-name{font-size:clamp(2rem,3.4vw,3.25rem);letter-spacing:-.04em;max-width:520px}
+.brand-name,.compact-name{min-width:0;overflow-wrap:anywhere}
+.compact-brand{min-width:0}.compact-chip{flex-shrink:0}
 .brand-slogan{font-size:16px;line-height:1.8;max-width:390px}
 .brand-features{gap:24px}.brand-features li{animation:sakura-enter .65s var(--ease-out) both}
 .brand-features li:nth-child(1){animation-delay:.1s}.brand-features li:nth-child(2){animation-delay:.18s}.brand-features li:nth-child(3){animation-delay:.26s}

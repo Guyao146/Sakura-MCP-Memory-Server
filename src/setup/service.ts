@@ -219,17 +219,17 @@ export class SetupService {
     if (input.embedding) {
       if (!input.embedding.model) throw new Error('Embedding model is required to test the embedding endpoint.');
       const provider = new OpenAICompatibleProvider(input.embedding.baseUrl.replace(/\/$/, ''), input.embedding.apiKey, undefined, input.embedding.model);
-      await provider.embed(['Sakura-MCP-Server installation test']);
+      await provider.embed(['Sakura-MCP-Memory-Server installation test']);
       return { provider: 'embedding', status: 'ok', embeddingTested: true };
     }
     if (input.openaiCompatible) {
       const provider = new OpenAICompatibleProvider(input.openaiCompatible.baseUrl.replace(/\/$/, ''), input.openaiCompatible.apiKey, input.openaiCompatible.chatModel, input.openaiCompatible.embeddingModel);
-      if (input.openaiCompatible.embeddingModel) await provider.embed(['Sakura-MCP-Server installation test']);
+      if (input.openaiCompatible.embeddingModel) await provider.embed(['Sakura-MCP-Memory-Server installation test']);
       return { provider: 'openai_compatible', status: 'ok', embeddingTested: Boolean(input.openaiCompatible.embeddingModel) };
     }
     if (input.ollama) {
       const provider = new OllamaProvider(input.ollama.baseUrl.replace(/\/$/, ''), input.ollama.chatModel, input.ollama.embeddingModel);
-      if (input.ollama.embeddingModel) await provider.embed(['Sakura-MCP-Server installation test']);
+      if (input.ollama.embeddingModel) await provider.embed(['Sakura-MCP-Memory-Server installation test']);
       return { provider: 'ollama', status: 'ok', embeddingTested: Boolean(input.ollama.embeddingModel) };
     }
     throw new Error('A provider configuration is required.');

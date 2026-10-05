@@ -104,7 +104,7 @@ export class SettingsRepository {
     try {
       await client.query('BEGIN');
       const state = await client.query<{ completed: boolean }>('SELECT completed FROM installation_state WHERE singleton=true FOR UPDATE');
-      if (state.rows[0]?.completed) throw new Error('Sakura-MCP-Server is already installed.');
+      if (state.rows[0]?.completed) throw new Error('Sakura-MCP-Memory-Server is already installed.');
       const put = async (key: string, value: unknown, encrypted: boolean) => client.query(
         `INSERT INTO system_settings(key,value,encrypted) VALUES($1,$2,$3)
          ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,encrypted=EXCLUDED.encrypted,updated_at=now()`,

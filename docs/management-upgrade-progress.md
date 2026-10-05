@@ -1,6 +1,6 @@
 # 管理与可靠性增强实施记录
 
-基线：`v0.4.1` / `b8eb3e2`。工作区：`D:\VSProject\Sakura-MCP-Server`。
+基线：`v0.4.1` / `b8eb3e2`。工作区：`D:\VSProject\Sakura-MCP-Memory-Server`。
 本批次已实现并完成本地可运行验证。用户随后授权推送 GitHub 并创建新标签，版本更新为 `0.5.0`；既有 `v0.4.1` 标签不移动。以下验证记录为推送前本地快照，远端 CI/发布结果以该提交的 GitHub Actions 为准；生产部署验收尚未完成。
 
 ## 实施清单

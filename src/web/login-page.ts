@@ -23,7 +23,7 @@ import { loginPolishStyles } from './design.js';
  */
 export const loginPage = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>登录 · Sakura-MCP-Server</title>
+<title>登录 · Sakura-MCP-Memory-Server</title>
 <meta name="theme-color" content="#12161f">
 <script>try{var t=localStorage.getItem('sakura-theme')||'auto';var d=t==='dark'||(t==='auto'&&matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.dataset.theme=d?'dark':'light'}catch(e){document.documentElement.dataset.theme='dark'}</script>
 <style>
@@ -76,7 +76,7 @@ ${loginPolishStyles}
 <section class="brand-panel">
   <div class="brand-body">
     <div class="brand-chip" aria-hidden="true"><svg viewBox="0 0 24 24"><mask id="sk-chip"><rect width="24" height="24" fill="#fff"/><circle cx="12" cy="11.8" r="2.1" fill="#000"/></mask><g fill="currentColor" mask="url(#sk-chip)"><circle cx="12" cy="6.5" r="4.1"/><circle cx="6.77" cy="10.3" r="4.1"/><circle cx="8.77" cy="16.45" r="4.1"/><circle cx="15.23" cy="16.45" r="4.1"/><circle cx="17.23" cy="10.3" r="4.1"/></g></svg></div>
-    <h2 class="brand-name">Sakura MCP Server</h2>
+    <h2 class="brand-name">Sakura MCP Memory Server</h2>
     <p class="brand-slogan">一个记忆库，服务你所有的 AI 助手。</p>
     <ul class="brand-features">
       <li><span class="feat-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg></span><span class="feat-text"><span class="feat-title">长期记忆</span><span class="feat-desc">跨会话保存与召回用户记忆</span></span></li>
@@ -89,7 +89,7 @@ ${loginPolishStyles}
 </section>
 <div class="side">
   <div class="form-col">
-    <header class="compact-brand"><span class="compact-chip" aria-hidden="true"><svg viewBox="0 0 24 24"><mask id="sk-mini"><rect width="24" height="24" fill="#fff"/><circle cx="12" cy="11.8" r="2.1" fill="#000"/></mask><g fill="currentColor" mask="url(#sk-mini)"><circle cx="12" cy="6.5" r="4.1"/><circle cx="6.77" cy="10.3" r="4.1"/><circle cx="8.77" cy="16.45" r="4.1"/><circle cx="15.23" cy="16.45" r="4.1"/><circle cx="17.23" cy="10.3" r="4.1"/></g></svg></span><span class="compact-name">Sakura MCP Server</span></header>
+    <header class="compact-brand"><span class="compact-chip" aria-hidden="true"><svg viewBox="0 0 24 24"><mask id="sk-mini"><rect width="24" height="24" fill="#fff"/><circle cx="12" cy="11.8" r="2.1" fill="#000"/></mask><g fill="currentColor" mask="url(#sk-mini)"><circle cx="12" cy="6.5" r="4.1"/><circle cx="6.77" cy="10.3" r="4.1"/><circle cx="8.77" cy="16.45" r="4.1"/><circle cx="15.23" cy="16.45" r="4.1"/><circle cx="17.23" cy="10.3" r="4.1"/></g></svg></span><span class="compact-name">Sakura MCP Memory Server</span></header>
     <main>
       <h1 id="title">欢迎回来</h1>
     <p class="sub" id="subtitle">请选择已启用的登录方式：本地账号、Sakura 或 Authentik。</p>
@@ -202,7 +202,7 @@ $('startButton').focus();
  */
 export const localLoginPage = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>登录 · Sakura-MCP-Server</title>
+<title>登录 · Sakura-MCP-Memory-Server</title>
 <meta name="theme-color" content="#12161f">
 <script>try{var t=localStorage.getItem('sakura-theme')||'auto';var d=t==='dark'||(t==='auto'&&matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.dataset.theme=d?'dark':'light'}catch(e){document.documentElement.dataset.theme='dark'}</script>
 <style>
@@ -259,7 +259,7 @@ ${loginPolishStyles}
 <section class="brand-panel">
   <div class="brand-body">
     <div class="brand-chip" aria-hidden="true"><svg viewBox="0 0 24 24"><mask id="sk-chip"><rect width="24" height="24" fill="#fff"/><circle cx="12" cy="11.8" r="2.1" fill="#000"/></mask><g fill="currentColor" mask="url(#sk-chip)"><circle cx="12" cy="6.5" r="4.1"/><circle cx="6.77" cy="10.3" r="4.1"/><circle cx="8.77" cy="16.45" r="4.1"/><circle cx="15.23" cy="16.45" r="4.1"/><circle cx="17.23" cy="10.3" r="4.1"/></g></svg></div>
-    <h2 class="brand-name">Sakura MCP Server</h2>
+    <h2 class="brand-name">Sakura MCP Memory Server</h2>
     <p class="brand-slogan">一个记忆库，服务你所有的 AI 助手。</p>
     <ul class="brand-features">
       <li><span class="feat-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg></span><span class="feat-text"><span class="feat-title">长期记忆</span><span class="feat-desc">跨会话保存与召回用户记忆</span></span></li>
@@ -272,7 +272,7 @@ ${loginPolishStyles}
 </section>
 <div class="side">
   <div class="form-col">
-    <header class="compact-brand"><span class="compact-chip" aria-hidden="true"><svg viewBox="0 0 24 24"><mask id="sk-mini"><rect width="24" height="24" fill="#fff"/><circle cx="12" cy="11.8" r="2.1" fill="#000"/></mask><g fill="currentColor" mask="url(#sk-mini)"><circle cx="12" cy="6.5" r="4.1"/><circle cx="6.77" cy="10.3" r="4.1"/><circle cx="8.77" cy="16.45" r="4.1"/><circle cx="15.23" cy="16.45" r="4.1"/><circle cx="17.23" cy="10.3" r="4.1"/></g></svg></span><span class="compact-name">Sakura MCP Server</span></header>
+    <header class="compact-brand"><span class="compact-chip" aria-hidden="true"><svg viewBox="0 0 24 24"><mask id="sk-mini"><rect width="24" height="24" fill="#fff"/><circle cx="12" cy="11.8" r="2.1" fill="#000"/></mask><g fill="currentColor" mask="url(#sk-mini)"><circle cx="12" cy="6.5" r="4.1"/><circle cx="6.77" cy="10.3" r="4.1"/><circle cx="8.77" cy="16.45" r="4.1"/><circle cx="15.23" cy="16.45" r="4.1"/><circle cx="17.23" cy="10.3" r="4.1"/></g></svg></span><span class="compact-name">Sakura MCP Memory Server</span></header>
     <main>
       <h1 id="title">欢迎回来</h1>
       <p class="sub" id="subtitle">请输入服务器本地账号的用户名和密码。</p>

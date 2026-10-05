@@ -3,7 +3,7 @@ set -eu
 
 secret_file=/run/sakura-secrets/app.env
 if [ ! -r "$secret_file" ]; then
-  echo "Sakura-MCP-Server secret volume is not initialized." >&2
+  echo "Sakura-MCP-Memory-Server secret volume is not initialized." >&2
   exit 1
 fi
 

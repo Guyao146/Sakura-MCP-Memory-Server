@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 if (-not (Test-Path '.\docker-compose.yml') -or -not (Test-Path '.\.env.example')) {
-  throw '请在 Sakura-MCP-Server 仓库根目录执行此脚本。'
+  throw '请在 Sakura-MCP-Memory-Server 仓库根目录执行此脚本。'
 }
 
 if (Test-Path '.\.env') {
@@ -61,7 +61,7 @@ New-Item -ItemType Directory -Force '.\data' | Out-Null
 if ($LocalBuild) {
   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 } else {
-  docker compose pull sakura-mcp postgres
+  docker compose pull sakura-mcp-memory postgres
   docker compose up -d
 }
 

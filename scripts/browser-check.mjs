@@ -56,6 +56,7 @@ try{
     admin=role;await cdp('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});
     await cdp('Page.navigate',{url:'http://127.0.0.1:'+server.address().port+'/admin'});
     await waitFor(`document.getElementById('aboutVersion')?.textContent==='v${APP_VERSION}'&&document.readyState==='complete'`);
+    assert.equal(await evaluate(`document.title.includes('Sakura-MCP-Memory-Server')`),true);
     await evaluate(`document.querySelector('[data-view="management"]').click()`);
     await waitFor(`document.getElementById('manageMemories').children.length===1&&document.getElementById('managePage').textContent.includes('1')`);
     assert.equal(await evaluate(`document.getElementById('manageSpace').value`),sid);

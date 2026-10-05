@@ -27,7 +27,7 @@ const failure = (message: string) => ({ content: [{ type: 'text' as const, text:
 
 export function createServer(database: Database, principal: Principal, audit: AuditLogger, getConfig: () => AppConfig,
   requestIdentity?: ReturnType<MemoryRepository['ensureUser']>): McpServer {
-  const server = new McpServer({ name: 'Sakura-MCP-Server', version: APP_VERSION });
+  const server = new McpServer({ name: 'Sakura-MCP-Memory-Server', version: APP_VERSION });
   const repository = new MemoryRepository(database);
   const semantic = new SemanticMemoryService(database, getConfig);
   const governance = new MemoryGovernanceService(database);

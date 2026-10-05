@@ -1,0 +1,9 @@
+# Apply only when migrating an existing pre-rename deployment.
+# External volumes fail closed if either original volume is missing; they are never created.
+volumes:
+  postgres-data:
+    name: ${SAKURA_MEMORY_POSTGRES_VOLUME:-sakura-mcp-server_postgres-data}
+    external: true
+  runtime-secrets:
+    name: ${SAKURA_MEMORY_SECRETS_VOLUME:-sakura-mcp-server_runtime-secrets}
+    external: true

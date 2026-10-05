@@ -1,6 +1,13 @@
 # 更新日志
 
-本文件记录 Sakura-MCP-Server 的所有重要变更。
+本文件记录 Sakura-MCP-Memory-Server 的所有重要变更；历史版本中的旧名称及产物名称按发布时保留。
+
+## [0.5.1]
+
+- 项目及 GitHub 仓库更名为 **Sakura-MCP-Memory-Server**；npm tarball 包名与 GHCR 镜像路径统一为 `sakura-mcp-memory-server`。更新 MCP 握手名称、健康检查、登录/安装/管理台、更新检查、安装脚本、许可采用声明及生态 Wiki 链接。
+- Compose 项目、容器、网络和服务使用新名称，镜像变量推荐 `SAKURA_MCP_MEMORY_IMAGE`（兼容 `SAKURA_MCP_IMAGE`）。现有部署必须先阅读 [改名迁移指南](docs/rename-migration.md)，使用外部卷覆盖文件复用原数据库及密钥卷；不得直接启动成新空库，也不要执行 `down -v`。
+- 不更改数据库 schema、加密主密钥、Agent Key、会话 Cookie、MCP URL/工具名或已保存的 OIDC issuer/client ID。旧标签及历史镜像保留，不覆盖或重新标记。
+- 发布渠道仍为 GitHub Release npm tarball 与 GHCR；此前并未发布到 npm Registry，本次不新增 npm Registry 发布。
 
 ## [0.5.0]
 

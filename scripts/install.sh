@@ -5,7 +5,7 @@ set -Eeuo pipefail
 # prints generated secrets. Run from the repository root.
 
 if [[ ! -f docker-compose.yml || ! -f .env.example ]]; then
-  echo "请在 Sakura-MCP-Server 仓库根目录执行此脚本。" >&2
+  echo "请在 Sakura-MCP-Memory-Server 仓库根目录执行此脚本。" >&2
   exit 1
 fi
 
@@ -59,11 +59,11 @@ mkdir -p data
 # Compose prepare-data assigns the bind mount to the fixed application UID 10001.
 chmod 700 data
 
-echo "正在拉取并启动 PostgreSQL + Sakura-MCP-Server……"
+echo "正在拉取并启动 PostgreSQL + Sakura-MCP-Memory-Server……"
 if [[ "$local_build" == true ]]; then
   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 else
-  docker compose pull sakura-mcp postgres
+  docker compose pull sakura-mcp-memory postgres
   docker compose up -d
 fi
 

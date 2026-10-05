@@ -1,7 +1,7 @@
-export const APP_VERSION = '0.5.0';
+export const APP_VERSION = '0.5.1';
 
-const RELEASE_API_URL = 'https://api.github.com/repos/Guyao146/Sakura-MCP-Server/releases/latest';
-const RELEASE_PAGE_URL = 'https://github.com/Guyao146/Sakura-MCP-Server/releases/tag/';
+const RELEASE_API_URL = 'https://api.github.com/repos/Guyao146/Sakura-MCP-Memory-Server/releases/latest';
+const RELEASE_PAGE_URL = 'https://github.com/Guyao146/Sakura-MCP-Memory-Server/releases/tag/';
 
 interface ParsedVersion { numbers: [number, number, number]; prerelease?: string; }
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -41,7 +41,7 @@ export class UpdateChecker {
     const now = this.now();
     if (!force && this.cached && this.cached.expiresAt > now) return this.cached.value;
     const response = await this.fetcher(RELEASE_API_URL, {
-      headers: { Accept: 'application/vnd.github+json', 'User-Agent': `Sakura-MCP-Server/${this.currentVersion}` },
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': `Sakura-MCP-Memory-Server/${this.currentVersion}` },
       signal: AbortSignal.timeout(10_000)
     });
     if (!response.ok) throw new Error(`GitHub release check failed (${response.status}).`);

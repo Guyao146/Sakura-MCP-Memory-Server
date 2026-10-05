@@ -92,7 +92,7 @@ app.onError((error, context) => {
 
 const setupGuard = async (context: Context, next: Next) => {
   const installation = await settings.installation();
-  if (installation.completed) return context.json({ error: 'setup_locked', error_description: 'Sakura-MCP-Server is already installed.' }, 410);
+  if (installation.completed) return context.json({ error: 'setup_locked', error_description: 'Sakura-MCP-Memory-Server is already installed.' }, 410);
   await next();
 };
 
@@ -618,12 +618,12 @@ app.get('/health', async context => {
       cached = healthCache = { at: now, pgvector: vector.rows[0]?.version ?? 'missing', installed: installation.completed,
         pending: Number(queue.rows[0].pending), processing: Number(queue.rows[0].processing), failed: Number(queue.rows[0].failed) };
     }
-    return context.json({ status: 'ok', service: 'Sakura-MCP-Server', version: APP_VERSION,
+    return context.json({ status: 'ok', service: 'Sakura-MCP-Memory-Server', version: APP_VERSION,
       database: 'ok', pgvector: cached.pgvector, installed: cached.installed, authEnabled: config.authEnabled,
       worker: { enabled: baseConfig.worker.enabled, pending: cached.pending,
         processing: cached.processing, failed: cached.failed } });
   } catch {
-    return context.json({ status: 'degraded', service: 'Sakura-MCP-Server', version: APP_VERSION,
+    return context.json({ status: 'degraded', service: 'Sakura-MCP-Memory-Server', version: APP_VERSION,
       database: 'unavailable', authEnabled: config.authEnabled }, 503);
   }
 });
@@ -731,16 +731,16 @@ function clientAddressFor(context: Context): string | undefined {
 const requests = new RequestLifecycle();
 const httpServer = serve({ fetch: (request, env) => requests.handle(request, req => app.fetch(req, env)),
   hostname: baseConfig.host, port: baseConfig.port },
-info => logger.info({ host: baseConfig.host, port: info.port }, 'Sakura MCP Server listening'));
+info => logger.info({ host: baseConfig.host, port: info.port }, 'Sakura MCP Memory Server listening'));
 const shutdown = createShutdown(httpServer, requests, worker, database);
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
-    logger.info({ signal }, 'Sakura MCP Server shutting down');
+    logger.info({ signal }, 'Sakura MCP Memory Server shutting down');
     void shutdown().then(clean => {
-      if (!clean) logger.error('Sakura MCP Server shutdown timed out or cleanup failed');
+      if (!clean) logger.error('Sakura MCP Memory Server shutdown timed out or cleanup failed');
       process.exit(clean ? 0 : 1);
     }, error => {
-      logger.error({ err: error }, 'Sakura MCP Server shutdown failed');
+      logger.error({ err: error }, 'Sakura MCP Memory Server shutdown failed');
       process.exit(1);
     });
   });
